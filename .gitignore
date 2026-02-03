@@ -1,0 +1,41 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Credentials and secrets
+*.pem
+*.key
+*.crt
+credentials.json
+secrets.json
+*_credentials.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
