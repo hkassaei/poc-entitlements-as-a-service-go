@@ -62,6 +62,46 @@ Here's how a request flows through the system:
 
 ---
 
+## What Phase 1 Built (The Foundation)
+
+Phase 1 is the skeleton — the foundation that everything else builds on. Here's what exists right now:
+
+### The Codebase Structure
+
+```
+src/
+├── index.ts                 # Entry point: loads tracing FIRST, then starts server
+├── config/
+│   ├── index.ts             # Typed config from env vars (single source of truth)
+│   ├── constants.ts         # Protocol constants, AppIDs, EAP-AKA attributes
+│   ├── logger.ts            # Pino logger with Cloud Logging severity mapping
+│   ├── tracing.ts           # OpenTelemetry distributed tracing (auto-instruments pg, redis, http)
+│   └── metrics.ts           # OpenTelemetry metrics (meter provider for custom metrics)
+├── db/
+│   ├── schema.ts            # Drizzle ORM: 5 tables (subscribers, devices, entitlements, tokens, audit_log)
+│   ├── index.ts             # PostgreSQL pool + Drizzle instance
+│   └── redis.ts             # ioredis client with lazy connect + error handling
+├── protocol/
+│   ├── appIds.ts            # 12 service types (VoWiFi, VoLTE, eSIM, etc.)
+│   ├── statusCodes.ts       # Entitlement/service/provisioning/TC status enums
+│   ├── requestSchemas.ts    # TypeBox schemas for POST body + GET query validation
+│   └── requestTypes.ts      # TypeScript types derived from schemas (never drift)
+└── server/
+    ├── app.ts               # Fastify builder: hooks → error handler → routes → warmup
+    ├── routes/
+    │   ├── health.ts        # GET /health → { status: "ok" }
+    │   └── entitlement.ts   # GET & POST /entitlement → 501 (placeholder)
+    └── middleware/
+        ├── requestParser.ts # Normalizes GET query / POST body into uniform shape
+        ├── userAgent.ts     # Parses "PRD-TS43/2 (Apple; iPhone15Pro; Smartphone; iOS18)"
+        ├── versionCheck.ts  # Rejects unsupported entitlement_version → 406
+        └── errorHandler.ts  # Centralized error responses with structured JSON
+```
+
+Plus: `Dockerfile` (multi-stage build), `docker-compose.yml` (Postgres + Redis + ECS), `drizzle.config.ts`, `package.json`, `tsconfig.json`.
+
+---
+
 ## The Authentication Dance: EAP-AKA
 
 The most technically interesting part of the system is how we prove a device is who it claims to be, without the device ever sending its secret key over the network. This is the **EAP-AKA protocol** (Extensible Authentication Protocol — Authentication and Key Agreement), and it's beautifully elegant.
@@ -97,14 +137,6 @@ Phone                              ECS                        Mock HSS
 
 After this dance, the device gets a **token** that it presents on future requests — skipping the whole authentication ceremony. We call this "fast auth," and it's why your phone doesn't have to re-authenticate every time it checks entitlements.
 
-### The MILENAGE Algorithm
-
-The cryptographic math inside the SIM card follows an algorithm called **MILENAGE** (3GPP TS 35.206). We implement it ourselves in TypeScript rather than using an existing npm package, for a specific reason: the only existing package has 7 GitHub stars, no TypeScript types, no security audit, and is unmaintained. When you're implementing something that protects subscriber identity, "it works, probably" isn't good enough.
-
-The good news is that MILENAGE is elegant in its simplicity. The entire algorithm is built on a single cryptographic primitive: **AES-128 encryption**. Everything else is XOR operations and byte shuffling. We delegate AES to Node.js's `crypto` module (which calls OpenSSL, which uses hardware acceleration), so we never write our own crypto. We just wire up the specific sequence of operations the spec defines.
-
-The even better news: the 3GPP published official test vectors — known inputs with expected outputs. If our implementation produces the exact same outputs for every test set, it's provably correct. There's no ambiguity.
-
 ---
 
 ## The Technology Stack (And Why Each Choice Was Made)
@@ -119,25 +151,21 @@ Express is the default choice for Node.js HTTP servers, but we picked **Fastify*
 
 3. **Plugin encapsulation**: Each of the 13 service handlers (VoWiFi, VoLTE, ODSA, etc.) maps naturally to a Fastify plugin with its own routes and hooks.
 
-4. **Performance**: ~2-3x higher throughput than Express. During a mass re-authentication event (say, after a network outage when a million devices all wake up at once), lower per-request overhead is a real advantage.
-
 ### TypeBox Over Zod
 
-Both define validation schemas in TypeScript. We picked **TypeBox** because it outputs native JSON Schema, which Fastify compiles into Ajv validators at startup. Zod is a runtime interpreter — it re-evaluates schemas on every single request. Using Zod with Fastify would be like buying a sports car and then towing it with a truck. TypeBox also gives us a single source of truth: `Static<typeof schema>` infers TypeScript types from the validation schema, so they can never drift apart.
+Both define validation schemas in TypeScript. We picked **TypeBox** because it outputs native JSON Schema, which Fastify compiles into Ajv validators at startup. Zod is a runtime interpreter — it re-evaluates schemas on every single request. TypeBox also gives us a single source of truth: `Static<typeof schema>` infers TypeScript types from the validation schema, so they can never drift apart.
 
 ### PostgreSQL + Redis (Not One or the Other)
 
 Different data has different lifetimes and access patterns:
 
-- **Subscriber records, entitlements, and tokens** live in **PostgreSQL**. They need durability (survive restarts), relational integrity (tokens belong to subscribers), and auditability.
-
-- **EAP-AKA sessions** live in **Redis only**. They last ~90 seconds, need sub-millisecond lookup, and losing one just means the device re-authenticates. Writing these to Postgres would be like using a filing cabinet for Post-it notes.
-
-- **Auth tokens** use **both**: PostgreSQL is the durable source of truth; Redis is a fast-path cache. This "write-through cache" pattern means token validation (the hottest code path — every single request hits it) runs in sub-millisecond time, but tokens survive a Redis restart.
+- **Subscriber records, entitlements, and tokens** live in **PostgreSQL**. They need durability, relational integrity, and auditability.
+- **EAP-AKA sessions** live in **Redis only**. They last ~90 seconds, need sub-millisecond lookup, and losing one just means the device re-authenticates.
+- **Auth tokens** use **both**: PostgreSQL is the durable source of truth; Redis is a fast-path cache (write-through pattern).
 
 ### Drizzle ORM
 
-Lightweight, type-safe, and stays close to SQL. For a system where the database schema is well-defined and queries are straightforward, heavy ORMs like Prisma or TypeORM add complexity without benefit.
+Lightweight, type-safe, and stays close to SQL. The schema in `src/db/schema.ts` defines 5 tables that map directly to the SQL in the spec. You can always drop down to raw SQL when needed — Drizzle doesn't try to hide the database from you.
 
 ---
 
@@ -145,176 +173,87 @@ Lightweight, type-safe, and stays close to SQL. For a system where the database 
 
 ### Why the Mock HSS Is a Separate Service
 
-This was one of the most important architectural decisions, and it came from asking: *"What's the worst thing that could happen?"*
+The most impactful architectural decision was making the Mock HSS a separate service. The ECS is internet-facing. If it's compromised and it holds Ki, the attacker gets everything — every subscriber's identity.
 
-The ECS is internet-facing. It's the service that attackers can reach. If it's compromised, what can the attacker get?
-
-If Ki (the subscriber secret key) lives inside the ECS, the answer is: *everything*. Every subscriber's identity. The ability to impersonate any device on the network.
-
-So we made a rule: **the ECS never touches Ki.** Not encrypted Ki, not the KMS key to decrypt Ki, nothing. The ECS calls the Mock HSS over the internal VPC and gets back derived vectors (RAND, AUTN, XRES, CK, IK). It has no way to reconstruct Ki from these — that's a mathematical property of the MILENAGE algorithm.
-
-The Mock HSS has no internet access. To get Ki, you'd need to compromise:
-1. The ECS (to reach the internal network)
-2. The Mock HSS (a separate service with its own attack surface)
-3. Cloud KMS (to unwrap the encryption keys)
-4. The database (to get the encrypted Ki)
-
-All four, simultaneously. That's defense in depth.
+So we made a rule: **the ECS never touches Ki.** The ECS calls the Mock HSS over the internal VPC and gets back derived vectors (RAND, AUTN, XRES, CK, IK). It has no way to reconstruct Ki from these — that's a mathematical property of the MILENAGE algorithm.
 
 ### Envelope Encryption
 
-Ki is encrypted at rest using **envelope encryption**: each subscriber has their own Data Encryption Key (DEK), and all DEKs are wrapped by a Key Encryption Key (KEK) that lives in Google Cloud KMS hardware. The KEK never leaves the KMS boundary. If someone steals the database, they get ciphertext. If someone compromises KMS alone, they don't have the per-subscriber wrapped DEKs. You need both.
-
-### EAP-AKA Response Idempotency
-
-Here's a subtle bug that took careful thought to prevent: what if the network drops the server's 200 OK response after authentication succeeds?
-
-The device retries. But the server already consumed the session, issued the token, and transitioned to SUCCESS state. Without special handling, the device either gets forced through a full re-authentication (wasteful and slow) or gets an error (wrong).
-
-The fix: on successful authentication, we cache the complete HTTP response in Redis, keyed by a fingerprint of the request. If the same request arrives again within 90 seconds, we replay the cached response verbatim. The device gets the token it earned. After 90 seconds, the cache expires and a fresh authentication starts (which is correct behavior by then).
+Ki is encrypted at rest using **envelope encryption**: each subscriber has their own Data Encryption Key (DEK), and all DEKs are wrapped by a Key Encryption Key (KEK) in Google Cloud KMS hardware. The KEK never leaves KMS. You need both the wrapped DEKs *and* KMS access to decrypt anything.
 
 ---
 
-## GCP Architecture: Production-Grade Infrastructure
+## Lessons From Phase 1
 
-### Cloud Run: The Right Fit
+### 1. Import Order Matters for OpenTelemetry
 
-Cloud Run runs containers that auto-scale based on traffic. Our ECS is a stateless HTTP server — all state lives in Cloud SQL and Memorystore. This is a perfect match: no cluster management (unlike GKE), auto-scaling from 1 to 100+ instances in seconds, and pay-per-request pricing.
+The very first line of `src/index.ts` is `import './config/tracing.js'`. This isn't decorative — OpenTelemetry works by monkey-patching modules (`http`, `pg`, `ioredis`) *before* they're imported. If you import `pg` before initializing OTel, the pg instrumentation silently does nothing. This is a common gotcha that causes engineers to think "tracing is broken" when really it's just loaded too late.
 
-### The Cold Start Problem
+**Takeaway:** When a library works by patching other modules, initialization order is part of your correctness contract. Document it. Enforce it.
 
-Cloud Run scales to zero by default. That's great for cost, terrible for EAP-AKA. The authentication handshake requires 2+ HTTP round-trips, and if both the ECS and Mock HSS are cold, the startup chain stacks up to 3-6 seconds before the first response. Add mobile network latency, and you risk timeouts.
+### 2. The `Redis.default` ESM Constructor Trap
 
-The fix: `minInstances: 1` on both services. At least one container is always warm with live database and Redis connections. Cost is minimal (Cloud Run bills idle instances at reduced rates) vs. the risk of first-request failures.
+When using ioredis with ESM (`"type": "module"` in package.json), `new Redis(...)` fails with "not constructable." The fix is `new Redis.default(...)`. This is a classic ESM/CJS interop issue — the module's default export gets wrapped in a namespace object. This bug produces a confusing error message that gives no hint about the actual cause.
 
-### Connection Pool Management
+**Takeaway:** ESM/CJS interop in Node.js is still rough. When a constructor "isn't constructable," check if you need `.default`. This is especially common with `ioredis`, `pg`, and other packages that haven't fully migrated to ESM.
 
-Here's a problem specific to serverless: Cloud Run can scale from 1 to 100 instances in seconds during a traffic spike. Each instance opens a database connection pool. If each pool has 10 connections (the library default), 100 instances means 1,000 connections — far more than Cloud SQL supports.
+### 3. Schema-First Design Eliminates Type Drift
 
-We address this with three layers:
-1. **Small pool per instance**: `DB_POOL_SIZE=5` (configurable at deployment time)
-2. **Instance ceiling**: `maxInstances: 100` (hard cap: 100 x 5 = 500 max connections)
-3. **Managed connection pooling**: For production scale, Cloud SQL Enterprise Plus offers a built-in PgBouncer-compatible pooler. Switching is a `DATABASE_URL` port change — no code changes.
+The TypeBox schemas in `requestSchemas.ts` are the single source of truth. The TypeScript types in `requestTypes.ts` are *derived* from those schemas via `Static<typeof ...>`. If the schema says `terminal_id` is 14-16 characters, the TypeScript type inherits that constraint. One definition, two uses, zero drift.
 
-The key insight: both `DB_POOL_SIZE` and `maxInstances` are deployment-time parameters, not hardcoded. Operators tune them for their Cloud SQL tier.
+**Takeaway:** "Define once, derive everywhere" is a powerful pattern. Whenever you find yourself maintaining two parallel definitions (validation rules + TypeScript types, database schema + API types), look for a way to derive one from the other.
 
-### Cloud Armor: DDoS and WAF at the Edge
+### 4. Fastify Hooks vs Express Middleware
 
-The ECS is internet-facing and will receive traffic from millions of devices. Cloud Armor sits in front of the load balancer and inspects all traffic before it reaches our application:
+Fastify doesn't use `app.use()`. Instead, it has lifecycle hooks (`onRequest`, `preValidation`, `preHandler`, etc.) that fire at specific points. Our hooks run in order: parse the request → parse the User-Agent → check the version. If the version check fails (406), it fires *before* Fastify's schema validation, saving CPU on obviously invalid requests.
 
-- **Volumetric DDoS** is absorbed at Google's edge network (SYN floods, UDP reflection)
-- **Rate limiting** throttles per-IP to 100 req/min (devices authenticate infrequently — sustained high rates mean abuse)
-- **Geo-restriction** blocks countries with no subscriber base
-- **OWASP rules** catch SQL injection, XSS, and protocol attacks (defense-in-depth with TypeBox validation)
-- **Request size limits** reject bodies over 8KB (entitlement requests are small)
+**Takeaway:** Understanding your framework's request lifecycle — not just "middleware runs in order" but *exactly when* each hook fires relative to validation — lets you fail fast and cheaply.
 
-The critical point: attacks are handled *before* reaching Cloud Run. This prevents both service disruption *and* cost spikes from auto-scaling to absorb junk traffic.
+### 5. Lazy Connections Prevent Startup Crashes
 
-### Direct VPC Egress (Not VPC Connectors)
+Redis uses `lazyConnect: true`, meaning it doesn't try to connect when instantiated. Instead, it connects during Fastify's `onReady` hook. This prevents a race condition where Redis connection errors crash the process before error handlers are registered.
 
-VPC Connectors are the older way to connect Cloud Run to a VPC. They provision a group of small VMs that act as proxies — adding latency, throughput limits, and cost. Direct VPC Egress places Cloud Run instances directly on the VPC subnet with no intermediary. Lower latency to Redis and Cloud SQL, no connector to manage, no extra billing.
+**Takeaway:** Any connection that can fail should be deferred to a lifecycle hook where you can handle the failure gracefully. Don't let a constructor crash your process.
 
----
+### 6. Multi-Stage Docker Builds: Smaller + Safer
 
-## Observability: Seeing What's Happening
+The Dockerfile has two stages: `builder` (all deps, compiles TS) and `runner` (production deps only, compiled JS). The final image doesn't contain TypeScript source, dev dependencies, or build tools. This shrinks the image and reduces the attack surface.
 
-A system you can't observe is a system you can't operate. We built observability in from day one, not as an afterthought.
+**Takeaway:** Always use multi-stage builds for compiled languages. The build environment should never ship to production.
 
-### The Three Pillars
+### 7. Why 501, Not 404
 
-1. **Cloud Logging** (structured logs via Pino): Every request logs app_id, operation, response code, and latency. Every EAP-AKA step logs session state transitions. Trace IDs are embedded in every log line so you can click a trace and see all correlated logs.
+The entitlement routes return `501 Not Implemented`, not `404 Not Found`. 404 means "this route doesn't exist." 501 means "I understand your request, but I haven't built the logic yet." This distinction matters when incrementally building a system — you can tell the difference between "wrong URL" and "not yet coded."
 
-2. **Cloud Trace** (distributed tracing via OpenTelemetry): A single request touches ECS → Redis → Mock HSS → Postgres → KMS. Traces show exactly where time is spent. Auto-instrumentation patches `http`, `pg`, and `ioredis` transparently — no manual span creation needed for most paths.
+**Takeaway:** HTTP status codes have precise meanings. Using the right one makes debugging easier and makes your API self-documenting.
 
-3. **Cloud Monitoring** (metrics and alerting): 11 custom metrics covering auth success rates, token cache hit ratios, HSS latency, DB pool utilization, and more. Alerting policies fire before users notice degradation.
+### 8. Config as a Typed Object, Not Scattered `process.env`
 
-### What We Never Log
+`src/config/index.ts` reads all environment variables once, applies defaults, and exports a typed `Config` object. No other file reads `process.env` directly. Benefits: tests can override config, the app starts without a `.env` file, and every config value has exactly one place where it's defined.
 
-This is as important as what we do log: **Ki, OP, DEK, wrapped DEK, token values, and EAP-Response content are never logged at any level.** Tokens are redacted to their last 8 characters. A log leak should never become a key leak.
+**Takeaway:** Scattering `process.env.THING` throughout a codebase leads to typos, missing defaults, and untestable code. Centralize config into a typed object at the boundary.
 
 ---
 
-## The Codebase: How It's Organized
+## What's Coming Next
 
+This Phase 1 is the skeleton. The real meat comes in later phases:
+
+- **Phase 2**: Mock HSS with MILENAGE cryptography (the SIM card math)
+- **Phase 3**: EAP-AKA authentication flow (challenge-response over HTTP)
+- **Phase 4**: Token management and entitlement queries
+- **Phase 5**: Full service handlers for all 12 AppIDs
+- **Phase 6**: Deployment to Google Cloud Run
+
+Right now, if you `curl` the entitlement endpoint, you get a 501. By Phase 4, you'll get a real cryptographic authentication challenge back.
+
+---
+
+## Quick Start
+
+```bash
+npm install                    # Install dependencies
+npm run build                  # Compile TypeScript → dist/
+docker compose up              # Start Postgres + Redis + ECS
+curl localhost:8443/health     # → { "status": "ok" }
 ```
-src/
-  config/           ← Environment, logging, tracing, metrics (initialized first)
-  server/           ← Fastify app, routes, middleware hooks
-  auth/             ← EAP-AKA state machine, codec, token management
-  services/         ← 13 entitlement handlers (one per AppID)
-  protocol/         ← TypeBox schemas, XML/JSON response builders
-  db/               ← Drizzle schema, migrations, data access
-  mock/             ← Test data, mock BSS/SM-DP+
-  utils/            ← Crypto helpers, validation utilities
-
-mock-hss/           ← SEPARATE SERVICE (its own Dockerfile, package.json)
-  src/
-    milenage.ts     ← MILENAGE algorithm (AES-128 via Node crypto)
-    kms.ts          ← Envelope encryption (Cloud KMS / local KEK)
-    db.ts           ← Read encrypted Ki from Postgres
-
-tests/
-  unit/             ← Codec, crypto, MILENAGE test vectors
-  integration/      ← Full EAP-AKA handshake, entitlement flows
-  fixtures/         ← Sample requests/responses, AKA test vectors
-```
-
-The key structural decision: `mock-hss/` is a completely separate application with its own Dockerfile. It shares the Postgres database but has its own connection pool, its own Cloud Run service, and its own IAM permissions. From the ECS's perspective, it's just a URL (`HSS_URL`) that returns AKA vectors.
-
----
-
-## Lessons and Takeaways
-
-### 1. Separate Your Trust Boundaries
-
-The most impactful architectural decision was making the Mock HSS a separate service. The initial instinct was to embed it in the ECS — it's simpler, it's one fewer service to deploy, and "it's just a POC." But that would mean the internet-facing server holds the keys to impersonate any subscriber. Good engineers ask: *"What happens when this gets compromised?"* — not *if*, but *when*.
-
-**The lesson:** When you have data with different sensitivity levels (public HTTP requests vs. subscriber secret keys), put them in different processes with different network access and different IAM permissions. The boundary should match the threat model.
-
-### 2. Don't Use Third-Party Libraries for Security-Critical Crypto (Unless They're Audited)
-
-The existing MILENAGE npm package would have been the quick path. But it has 7 stars, no TypeScript types, no security audit, and no recent maintenance. For something that protects subscriber identity, "it seems to work" isn't a standard. We wrote our own, delegated the actual crypto primitive (AES-128) to Node.js's battle-tested `crypto` module, and validated against the 3GPP's official test vectors.
-
-**The lesson:** The build-vs-buy decision for cryptographic code depends on the maturity of the available library. A well-audited, widely-used library (like `crypto`, OpenSSL, or `libsodium`) is almost always better than rolling your own. But an obscure, unmaintained library with no audit is worse than a careful implementation validated against a spec's official test vectors.
-
-### 3. Idempotency Isn't Optional for Multi-Step Protocols
-
-EAP-AKA requires 2+ HTTP round-trips. Networks drop packets. If you don't handle retries of the final step, you force devices through unnecessary re-authentication or return errors for already-authenticated sessions. The cached response replay pattern (fingerprint → Redis → replay) is simple but essential.
-
-**The lesson:** Any multi-step protocol over an unreliable network needs an idempotency strategy. Ask yourself: *"What happens if the client never received my response and retries?"* Design for it before you write the handler code.
-
-### 4. Serverless Doesn't Mean Stateless Concerns Disappear
-
-Cloud Run auto-scales beautifully, but it creates new problems:
-- **Connection exhaustion**: 100 instances x 10 default pool size = 1,000 connections. Cloud SQL can't handle that.
-- **Cold starts**: A multi-service chain (ECS → Mock HSS) with cold starts on both ends can stack up to 6 seconds.
-- **Cost amplification from attacks**: Without Cloud Armor, a DDoS causes Cloud Run to auto-scale to absorb junk traffic — and you pay for every instance.
-
-**The lesson:** Serverless trades operational complexity for architectural complexity. You get auto-scaling for free, but you need to think about connection budgets, cold start chains, and cost protection. Configure `maxInstances`, `minInstances`, and pool sizes as deployment-time parameters — not hardcoded values.
-
-### 5. Validation Belongs at the Framework Level, Not in Your Code
-
-Hand-writing request validation in every handler is tedious, error-prone, and inconsistent. By using TypeBox schemas that Fastify compiles into Ajv validators at startup, we get:
-- **Runtime protection** against malformed payloads (before handler code runs)
-- **TypeScript types** inferred from the same schema (no duplicate definitions)
-- **Consistent error responses** (Fastify returns structured 400 errors automatically)
-- **Defense against injection** (regex patterns on IMEI, IMSI, MSISDN restrict to digits-only)
-
-**The lesson:** Pick a framework that makes the secure path the easy path. If validation requires extra effort, developers will skip it. If it's baked into the route definition, it happens by default.
-
-### 6. Observability Is Day-One Architecture, Not a Phase-2 Afterthought
-
-We initialize OpenTelemetry tracing and metrics *before* Fastify starts. Auto-instrumentation patches `http`, `pg`, and `ioredis` at import time, so every database query and Redis command generates a trace span with no code changes. Trace IDs are embedded in every log line, so you can go from a Cloud Trace waterfall to the exact log entries for that request.
-
-**The lesson:** If you add observability after the system is built, you end up with gaps — the one service call that isn't traced, the one error path that doesn't log. Wire it in at the foundation layer and let auto-instrumentation handle the rest.
-
-### 7. Design for the Migration You Know Is Coming
-
-The ECS doesn't know whether it's talking to a mock HSS or a real one. It calls `HSS_URL` and gets vectors back. Migrating to a real HSS means:
-1. Set `HSS_URL` to the Diameter-to-HTTP gateway
-2. Ensure the gateway returns the same JSON contract
-3. No code changes
-
-Similarly, switching from direct Cloud SQL connections to managed connection pooling is a `DATABASE_URL` port change (5432 → 6432). No code changes.
-
-**The lesson:** Identify the integration points that will change in production and make them configuration-driven from the start. An interface that's easy to swap is worth more than an implementation that's optimized for today's deployment.
