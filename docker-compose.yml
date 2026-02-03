@@ -25,6 +25,21 @@ services:
       timeout: 5s
       retries: 5
 
+  mock-hss:
+    build: ./mock-hss
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      DATABASE_URL: "postgresql://ecs:password@postgres:5432/entitlements"
+      DB_POOL_SIZE: "5"
+      LOCAL_KEK_HEX: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      NODE_ENV: "development"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   ecs:
     build: .
     ports:
@@ -46,6 +61,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mock-hss:
+        condition: service_started
 
 volumes:
   pgdata:
