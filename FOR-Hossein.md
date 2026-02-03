@@ -235,17 +235,144 @@ The entitlement routes return `501 Not Implemented`, not `404 Not Found`. 404 me
 
 ---
 
+## Phase 3: EAP-AKA Authentication — The Core Protocol
+
+Phase 3 is where the project comes alive. The 501 stubs are gone, replaced by a working two-round-trip EAP-AKA challenge-response flow. Here's what was built:
+
+### New Files in `src/auth/`
+
+```
+src/auth/
+  eapCodec.ts          — EAP-AKA packet binary encoder/decoder (RFC 4187)
+  keyDerivation.ts     — SHA-1 PRF + HMAC-MAC key derivation
+  eapAkaVectors.ts     — HTTP client that calls the mock HSS
+  eapSession.ts        — Redis session management (90s TTL)
+  tokenService.ts      — Token generation + validation (Postgres + Redis)
+  eapIdempotency.ts    — Response replay cache for retried requests
+  eapAka.ts            — The orchestrator: ties all six modules together
+```
+
+Plus modifications to `src/server/routes/entitlement.ts` and 3 test files.
+
+### How the Code Flows
+
+When a phone hits `POST /entitlement`, the route handler does three-path routing:
+
+1. **Token present?** → Validate via Redis/Postgres → return entitlements
+2. **eap_relay present?** → Process EAP-AKA response → issue token → return entitlements
+3. **Neither?** → Require IMSI → challenge the device → return 401
+
+The orchestrator (`eapAka.ts`) coordinates the flow:
+
+**Round Trip 1 (Challenge):**
+```
+fetchVectors(imsi)           → call mock HSS for RAND, AUTN, XRES, IK, CK
+buildIdentity(imsi)          → "0" + imsi (permanent identity format)
+deriveKeys(identity, ik, ck) → MK = SHA-1(id|IK|CK) → PRF → K_encr, K_aut, MSK, EMSK
+encodeEapPacket(challenge)   → binary packet with AT_RAND, AT_AUTN, zeroed AT_MAC
+computeMac(kAut, packet)     → HMAC-SHA-1 truncated to 16 bytes
+patch MAC into packet bytes  → find AT_MAC offset, copy real MAC value in
+createSession(redis)         → store XRES, K_aut, state=CHALLENGE_SENT, 90s TTL
+return 401 + eap_relay + X-EAP-Session-Id header
+```
+
+**Round Trip 2 (Response):**
+```
+getSession(sessionId)         → retrieve from Redis (or fail if expired)
+decodeEapPacket(eap_relay)    → parse the device's EAP-Response
+check subtype                 → handle AUTH_REJECT, SYNC_FAILURE, wrong type
+timingSafeEqual(AT_RES, XRES) → verify the SIM's answer (constant-time!)
+verifyMac(kAut, packet, mac)  → verify the packet wasn't tampered with
+generateToken(subscriberId)   → crypto.randomBytes(32) → Postgres + Redis
+deleteSession(sessionId)      → clean up Redis
+return 200 + token + EAP-Success
+```
+
+### Lessons From Phase 3
+
+#### 1. Binary Protocol Encoding: Alignment Bites
+
+The EAP-AKA packet format requires every attribute to be padded to **4-byte boundaries**, with the "length" field counting in 4-byte words. Our first AT_RES encoding had a subtle bug:
+
+```typescript
+// BUG: padded the value payload independently of the 2-byte header
+const paddedLen = Math.ceil((2 + attr.value.length) / 4) * 4;
+// Gave 12 bytes of payload → total = 2 (header) + 12 = 14 bytes. Not aligned!
+
+// FIX: pad the ENTIRE attribute (including header) to multiple of 4
+const totalAttrLen = Math.ceil((2 + 2 + attr.value.length) / 4) * 4;
+valuePayload = Buffer.alloc(totalAttrLen - 2);
+```
+
+**Takeaway**: When working with binary protocols, think about alignment from the total structure's perspective, not individual fields. Draw the byte layout on paper first.
+
+#### 2. Timing-Safe Comparisons Are Non-Negotiable
+
+When comparing AT_RES to XRES, we use `crypto.timingSafeEqual()` instead of `===` or `Buffer.equals()`. Regular comparison stops at the first mismatched byte — an attacker could measure response times and gradually guess the correct value.
+
+```typescript
+// WRONG — leaks timing information
+if (atRes.value.equals(expectedXres)) { ... }
+
+// RIGHT — constant-time comparison
+if (crypto.timingSafeEqual(atRes.value, expectedXres)) { ... }
+```
+
+**Takeaway**: Any comparison of secret values (tokens, MACs, passwords, crypto outputs) must be timing-safe. This is a one-line fix that prevents a real attack class.
+
+#### 3. The FIPS 186-2 PRF: Grade-School Addition at 160 Bits
+
+The key derivation PRF treats a 20-byte buffer as a single 160-bit big-endian integer and does modular addition. We had to implement carry-propagating addition across 20 bytes:
+
+```typescript
+function add160(a: Buffer, b: Buffer): void {
+  let carry = 0;
+  for (let i = 19; i >= 0; i--) {  // right-to-left, just like adding by hand
+    const sum = a[i]! + b[i]! + carry;
+    a[i] = sum & 0xff;
+    carry = sum >> 8;
+  }
+}
+```
+
+**Takeaway**: Crypto algorithms often treat byte arrays as big numbers. Understanding endianness (3GPP is always big-endian) is crucial for correctness.
+
+#### 4. The MAC-Over-Zeroed-MAC Pattern
+
+To compute AT_MAC, you include the MAC attribute in the packet (so the length is correct) but zero its value first. Then you patch the real MAC in afterward:
+
+```typescript
+// 1. Build packet with zeroed MAC field
+const packet = encodeEapPacket({ ..., attributes: [..., { type: AT_MAC, value: Buffer.alloc(16) }] });
+// 2. Compute MAC over the entire packet (with zeroed MAC)
+const mac = computeMac(kAut, packet);
+// 3. Patch real MAC into the packet bytes at the right offset
+mac.copy(packet, macOffset + 4);
+```
+
+If you compute the MAC without the MAC attribute present, the packet length differs, and verification on the other side fails silently.
+
+**Takeaway**: Read the RFC carefully. "The MAC is calculated over the EAP packet with the MAC field set to zero" means the field must *exist* but be zeroed — not absent.
+
+#### 5. Idempotency Prevents Double-Token-Generation
+
+Network requests get retried. Without idempotency, Round Trip 2 could try to consume a session that's already been deleted, causing a failure. Our solution: cache successful responses for 90 seconds, keyed by `SHA-256(sessionId + eapRelay)`.
+
+**Takeaway**: Any state-mutating operation should be idempotent. Cache the result and replay it for duplicate requests.
+
+#### 6. Error Cases Outnumber Happy Paths 10:1
+
+The `handleEapResponse()` function handles 10 distinct error cases before reaching the success path. Each one: logs the issue, cleans up the session, returns EAP-Failure. This is normal — good engineers spend more time thinking about failure modes than success paths.
+
+---
+
 ## What's Coming Next
 
-This Phase 1 is the skeleton. The real meat comes in later phases:
-
-- **Phase 2**: Mock HSS with MILENAGE cryptography (the SIM card math)
-- **Phase 3**: EAP-AKA authentication flow (challenge-response over HTTP)
-- **Phase 4**: Token management and entitlement queries
-- **Phase 5**: Full service handlers for all 12 AppIDs
+- **Phase 4**: Full service handlers for all 12 AppIDs
+- **Phase 5**: ODSA eSIM operations
 - **Phase 6**: Deployment to Google Cloud Run
 
-Right now, if you `curl` the entitlement endpoint, you get a 501. By Phase 4, you'll get a real cryptographic authentication challenge back.
+Now if you `curl` the entitlement endpoint with a valid IMSI, you get a real cryptographic challenge back!
 
 ---
 
@@ -254,6 +381,14 @@ Right now, if you `curl` the entitlement endpoint, you get a 501. By Phase 4, yo
 ```bash
 npm install                    # Install dependencies
 npm run build                  # Compile TypeScript → dist/
-docker compose up              # Start Postgres + Redis + ECS
-curl localhost:8443/health     # → { "status": "ok" }
+docker compose up --build      # Start Postgres + Redis + Mock HSS + ECS
+# Seed test subscribers (run once):
+docker compose exec mock-hss npx tsx src/seed.ts
+
+# Test the EAP-AKA challenge (Round Trip 1):
+curl -s -X POST http://localhost:8443/entitlement \
+  -H 'Content-Type: application/json' \
+  -d '{"app":"ap2004","terminal_id":"12345678901234","entitlement_version":"2","imsi":"001010000000001"}' \
+  -D -
+# → 401 + eap_relay (base64 EAP-Challenge) + X-EAP-Session-Id header
 ```
