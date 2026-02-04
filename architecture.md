@@ -16,7 +16,7 @@ graph TB
 
         subgraph VPC["VPC (Private Network)"]
             subgraph ECS_Service["Cloud Run: entitlement-server (Public Ingress via LB)"]
-                ECS["ECS<br/>Fastify + TypeBox<br/>EAP-AKA State Machine<br/>Token Management<br/>13 Service Handlers"]
+                ECS["ECS<br/>Fastify + TypeBox<br/>EAP-AKA State Machine<br/>Token Management<br/>12 Service Handlers"]
             end
 
             subgraph HSS_Service["Cloud Run: mock-hss (Internal-Only Ingress)"]
@@ -344,12 +344,15 @@ Lower-priority services that round out the TS.43 specification. Some get full im
 
 | # | Task | What It Delivers |
 |---|------|------------------|
-| 1 | Data Plan Information (ap2010) | `src/services/dataPlan.ts` — returns DataPlanInfo (AccessType, DataPlanType), DataUsageInfo (allowance, used bytes, billing cycle), DataBoostInfo (boost eligibility, QoS parameters). |
-| 2 | Server-Initiated ODSA (ap2011) | `src/services/serverOdsa.ts` — enterprise/MDM flow using server-to-server OAuth 2.0 with JWT client assertion. Three-tier token model: OAuth Access Token → Auth Token (scoped to enterprise_id) → per-device operations. |
-| 3 | Direct Carrier Billing (ap2012) | `src/services/directCarrierBilling.ts` — entitlement check for mobile payment. Implements the EntitlementStatus × TC_Status state matrix (INCOMPATIBLE, DISABLED + T&C websheet, ENABLED + can purchase). |
-| 4 | Remaining services (ap2013–ap2016) | Stubs with correct response format: Private User Identity (ap2013), Device and User Info (ap2014), App Authentication (ap2015), SatMode (ap2016). Return valid XML/JSON structures with sensible default values. |
+| 1 | Data Plan Information (ap2010) | `src/services/dataPlan.ts` — operation-aware handler supporting CheckEligibility, AcquirePlan, and GetPlanDetails. Returns plan details (allowance, usage, billing cycle, access type, boost eligibility) via extraParams. |
+| 2 | Server-Initiated ODSA (ap2011) | `src/services/serverOdsa.ts` — operation-aware handler for enterprise-managed eSIM provisioning. Reuses `buildOdsaBaseConfig` from odsaCommon.ts with the same SubscriptionResult pattern as companion/primary. Supports CheckEligibility, ManageSubscription, ManageService. |
+| 3 | Direct Carrier Billing (ap2012) | `src/services/directCarrierBilling.ts` — simple builder implementing the EntitlementStatus × TC_Status decision matrix (INCOMPATIBLE → message, DISABLED + REQUIRES_ACCEPTANCE → websheet, ENABLED → can purchase). |
+| 4 | Private User Identity (ap2013) | `src/services/privateUserIdentity.ts` — simple builder returning pseudonym and identity type when enabled. |
+| 5 | Device and User Info (ap2014) | `src/services/deviceUserInfo.ts` — operation-aware handler supporting GetPhoneNumber and GetSubscriberInfo. Returns MSISDN, display name, and home carrier via extraParams. |
+| 6 | App Authentication (ap2015) | `src/services/appAuthentication.ts` — simple builder returning operator token endpoint URL and scope when enabled. |
+| 7 | Satellite Mode (ap2016) | `src/services/satMode.ts` — simple builder returning PLMN allow/barred lists and service constraints when enabled. |
 
-**Exit criteria:** All 13 AppIDs (ap2003–ap2016) return a valid response in both XML and JSON format. No unhandled AppID routes to a 501 Not Implemented.
+**Exit criteria:** All 12 AppIDs (ap2003–ap2006, ap2009–ap2016) return a valid response in both XML and JSON format. No unhandled AppID routes to a 501 Not Implemented. 31 unit tests cover all 7 new builders.
 
 ---
 
