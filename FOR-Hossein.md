@@ -917,6 +917,157 @@ cloudbuild.yaml                       # 13-step CI/CD pipeline
 
 ---
 
+## Deploying to GCP: What You Actually Need
+
+All the Terraform modules and CI/CD pipeline are written, but deploying requires a few things from the real world.
+
+### The One Thing You Must Have
+
+A **GCP project with billing enabled.** Every resource — Cloud SQL, Memorystore, KMS, Cloud Run — lives inside a project. Without billing, none of them can be created. If you're experimenting, Google offers $300 in free credits for new accounts.
+
+### Tools on Your Machine
+
+You need three tools installed locally:
+
+| Tool | Why | Install |
+|------|-----|---------|
+| **`gcloud` CLI** | Authenticates you to GCP and lets you manage resources from the terminal | `brew install google-cloud-sdk` or [cloud.google.com/sdk](https://cloud.google.com/sdk/docs/install) |
+| **Terraform >= 1.5** | Reads our `terraform/` modules and provisions all the infrastructure | `brew install terraform` or [terraform.io](https://developer.hashicorp.com/terraform/install) |
+| **Docker** | Builds the container images for the first manual push (CI/CD takes over after that) | [docker.com](https://docs.docker.com/get-docker/) |
+
+### Authentication
+
+Two commands get you authenticated:
+
+```bash
+gcloud auth login                        # Your browser opens, you log in
+gcloud auth application-default login    # Creates credentials Terraform can use
+```
+
+Your account needs **Owner** or **Editor** role on the project. This is because Terraform needs to enable APIs, create service accounts, set IAM policies, and create resources across multiple GCP services.
+
+### Decisions to Make (There Are Only 5)
+
+| Variable | What it is | Default | Do you need to change it? |
+|----------|-----------|---------|--------------------------|
+| `project_id` | Your GCP project ID | *none — required* | Yes, always |
+| `region` | Where to deploy | `us-central1` | Only if you need a specific region |
+| `db_tier` | Cloud SQL machine size | `db-f1-micro` | No — cheapest tier, fine for POC |
+| `db_ha_enabled` | Database high availability | `false` | No — unnecessary for POC |
+| `operator_mcc` / `operator_mnc` / `operator_name` | Operator identity in TS.43 responses | `001` / `01` / `TestOperator` | Only if simulating a specific carrier |
+
+Everything else is wired up automatically by the Terraform modules.
+
+### The Deployment Sequence
+
+Think of this as a five-act play. Each act depends on the one before it.
+
+**Act 1: Configure** — Tell Terraform about your project.
+
+```bash
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# Edit terraform.tfvars and fill in your project_id
+```
+
+**Act 2: Provision** — Terraform creates ~30 GCP resources in the right order.
+
+```bash
+cd terraform
+terraform init    # Downloads the Google provider
+terraform plan    # Shows exactly what will be created (review this!)
+terraform apply   # Creates everything: VPC, Cloud SQL, Redis, KMS,
+                  # Secret Manager, Artifact Registry, Cloud Run services,
+                  # Cloud Armor WAF, 3 service accounts with least-privilege IAM
+```
+
+This takes 5–15 minutes. Cloud SQL is the slowest to provision.
+
+**Act 3: Build & Push** — Build Docker images and push them to Artifact Registry.
+
+```bash
+# Authenticate Docker to Artifact Registry
+gcloud auth configure-docker us-central1-docker.pkg.dev
+
+# Build and push both images
+docker build -t us-central1-docker.pkg.dev/YOUR_PROJECT/entitlements/ecs:latest .
+docker build -t us-central1-docker.pkg.dev/YOUR_PROJECT/entitlements/mock-hss:latest mock-hss/
+docker push us-central1-docker.pkg.dev/YOUR_PROJECT/entitlements/ecs:latest
+docker push us-central1-docker.pkg.dev/YOUR_PROJECT/entitlements/mock-hss:latest
+```
+
+**Act 4: Database Setup** — Run migrations and seed test data.
+
+```bash
+npx tsx src/db/migrate.ts              # Apply schema migrations
+npx tsx src/db/seed-entitlements.ts    # Seed Alice, Bob, Charlie + 23 entitlements
+```
+
+**Act 5: Verify** — Check that everything is alive.
+
+```bash
+# Get the deployed URL
+ECS_URL=$(gcloud run services describe entitlement-server \
+  --region=us-central1 --format='value(status.url)')
+
+# Health check
+curl $ECS_URL/health
+# → {"status":"ok"}
+
+# EAP-AKA challenge test
+curl -s -X POST $ECS_URL/entitlement \
+  -H 'Content-Type: application/json' \
+  -d '{"app":"ap2004","terminal_id":"123456789012345","entitlement_version":"2","imsi":"001010000000001"}' \
+  -D -
+# → 401 + EAP-Challenge (authentication is working!)
+```
+
+### Wiring Up CI/CD (Optional, After First Deploy)
+
+Once the first manual deploy works, you can connect GitHub to Cloud Build so that every push to `main` automatically builds, tests, and deploys:
+
+1. Go to **Cloud Build > Triggers** in the GCP Console
+2. Click **"Connect Repository"** and authorize your GitHub repo
+3. Create a trigger pointing at `cloudbuild.yaml` on the `main` branch
+
+After this, the 13-step pipeline in `cloudbuild.yaml` handles everything: install → compile → test → build images → push → migrate → deploy mock-hss → deploy ECS → smoke test.
+
+### What Does It Cost?
+
+For a POC that sits mostly idle:
+
+| Resource | Monthly Cost |
+|----------|-------------|
+| Cloud SQL (`db-f1-micro`) | ~$8 |
+| Memorystore Redis (1GB basic) | ~$35 |
+| Cloud Run (both services) | Near-zero when idle |
+| KMS (1 key, 90-day rotation) | ~$0.06 |
+| Artifact Registry + Secret Manager | Negligible |
+| **Total** | **~$40–50/month** |
+
+Memorystore is the biggest line item by far. If you're just running quick tests and don't need a persistent Redis, you could skip it and use a Cloud Run-hosted Redis container instead (not recommended for production, but fine for a quick POC demo).
+
+### What Terraform Creates (The Full Resource Map)
+
+For the curious, here's everything that `terraform apply` provisions:
+
+```
+Networking          → VPC + subnet + VPC connector + private service access
+Cloud SQL           → PostgreSQL 16 instance + database + user + generated password
+Memorystore         → Redis 7 instance (1GB, BASIC tier, VPC-connected)
+KMS                 → Keyring "entitlement-keys" + CryptoKey "ki-kek" (90-day rotation)
+Secret Manager      → database-url + redis-url secrets (auto-populated from other modules)
+Artifact Registry   → Docker repo "entitlements" (cleanup policy: keep last 10 images)
+Cloud Run (ECS)     → Public service, port 8080, VPC connector, secrets injected
+Cloud Run (mock-hss)→ Internal-only service, port 3001, VPC connector, KMS access
+Cloud Armor         → WAF policy: rate limit (100 req/s/IP), SQLi + XSS protection
+IAM                 → 3 service accounts: ecs-runner, mock-hss-runner, cloud-build-deployer
+GCP APIs            → 11 APIs enabled (Cloud Run, SQL, Redis, KMS, etc.)
+```
+
+The dependency graph flows bottom-up: networking first, then database/redis, then KMS/secrets, then Cloud Run services on top. Terraform figures out the order automatically from module references.
+
+---
+
 ## What's Coming Next
 
 - **Phase 9: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
