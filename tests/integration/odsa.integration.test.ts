@@ -3,7 +3,8 @@
  *
  * These tests require Docker services to be running:
  *   docker compose up -d postgres redis mock-hss
- *   npm run seed (if not already seeded)
+ *
+ * Entitlement seed data is applied automatically via vitest globalSetup.
  *
  * They exercise the full ODSA (On-Device Service Activation) flows
  * for companion (ap2006) and primary (ap2009) devices.
@@ -221,23 +222,23 @@ describe('ODSA Integration', () => {
     });
 
     it('no entitlement for subscriber+app → uses defaults', async () => {
-      const token = await getTokenForSubscriber(TEST_IMSI_ALICE);
+      const token = await getTokenForSubscriber(TEST_IMSI_BOB);
 
-      // ap2010 has no entitlement record for Alice
+      // Bob has no ap2005 (SMSoIP) entitlement — tests the default fallback
       const res = await app.inject({
         method: 'POST',
         url: '/entitlement',
         payload: {
           ...BASE_BODY,
-          app: 'ap2010',
+          app: 'ap2005',
           token,
         },
       });
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.ap2010).toBeDefined();
-      expect(body.ap2010.EntitlementStatus).toBe('1'); // default ENABLED
+      expect(body.ap2005).toBeDefined();
+      expect(body.ap2005.EntitlementStatus).toBe('1'); // default ENABLED
     });
   });
 });

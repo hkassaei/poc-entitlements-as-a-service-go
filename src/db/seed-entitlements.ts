@@ -316,8 +316,8 @@ const seedData: EntitlementSeed[] = [
   },
 ];
 
-async function seed() {
-  const client = new pg.Client({ connectionString: databaseUrl });
+export async function seedEntitlements(dbUrl?: string) {
+  const client = new pg.Client({ connectionString: dbUrl ?? databaseUrl });
 
   try {
     await client.connect();
@@ -357,7 +357,11 @@ async function seed() {
   }
 }
 
-seed().catch((err) => {
-  console.error('Entitlement seed failed:', err);
-  process.exit(1);
-});
+// Run directly when executed as a script (npx tsx src/db/seed-entitlements.ts)
+const isDirectRun = process.argv[1]?.includes('seed-entitlements');
+if (isDirectRun) {
+  seedEntitlements().catch((err) => {
+    console.error('Entitlement seed failed:', err);
+    process.exit(1);
+  });
+}

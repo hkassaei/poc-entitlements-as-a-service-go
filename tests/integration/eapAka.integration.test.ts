@@ -3,7 +3,8 @@
  *
  * These tests require Docker services to be running:
  *   docker compose up -d postgres redis mock-hss
- *   npm run seed (if not already seeded)
+ *
+ * Entitlement seed data is applied automatically via vitest globalSetup.
  *
  * They exercise the full two-round-trip EAP-AKA handshake through the
  * Fastify HTTP layer.
