@@ -9,7 +9,7 @@ import {
   AKA_SUBTYPE,
   AT,
   type EapPacket,
-} from '../src/auth/eapCodec.js';
+} from '../../src/auth/eapCodec.js';
 
 describe('EAP Codec', () => {
   describe('EAP-Success / EAP-Failure', () => {

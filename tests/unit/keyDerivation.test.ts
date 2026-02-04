@@ -7,8 +7,8 @@ import {
   deriveKeys,
   computeMac,
   verifyMac,
-} from '../src/auth/keyDerivation.js';
-import { encodeEapPacket, EAP_CODE, EAP_TYPE_AKA, AKA_SUBTYPE, AT } from '../src/auth/eapCodec.js';
+} from '../../src/auth/keyDerivation.js';
+import { encodeEapPacket, EAP_CODE, EAP_TYPE_AKA, AKA_SUBTYPE, AT } from '../../src/auth/eapCodec.js';
 
 describe('Key Derivation', () => {
   const testImsi = '001010000000001';

@@ -19,14 +19,14 @@ import {
   AKA_SUBTYPE,
   AT,
   type EapPacket,
-} from '../src/auth/eapCodec.js';
-import { buildIdentity, deriveKeys, computeMac } from '../src/auth/keyDerivation.js';
+} from '../../src/auth/eapCodec.js';
+import { buildIdentity, deriveKeys, computeMac } from '../../src/auth/keyDerivation.js';
 
 // Test subscriber from mock-hss seed.ts
 const TEST_IMSI = '001010000000001';
 
 // We need the app for HTTP testing
-let app: Awaited<ReturnType<typeof import('../src/server/app.js').buildApp>>;
+let app: Awaited<ReturnType<typeof import('../../src/server/app.js').buildApp>>;
 
 const BASE_BODY = {
   app: 'ap2004' as const,
@@ -40,7 +40,7 @@ beforeAll(async () => {
   process.env.REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
   process.env.HSS_URL = process.env.HSS_URL ?? 'http://localhost:3001';
 
-  const { buildApp } = await import('../src/server/app.js');
+  const { buildApp } = await import('../../src/server/app.js');
   app = await buildApp();
   await app.ready();
 });
