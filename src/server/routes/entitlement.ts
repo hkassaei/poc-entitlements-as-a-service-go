@@ -7,7 +7,7 @@ import { db } from '../../db/index.js';
 import { entitlements } from '../../db/schema.js';
 import { handleInitialRequest, handleEapResponse } from '../../auth/eapAka.js';
 import { HssSubscriberNotFoundError } from '../../auth/eapAkaVectors.js';
-import { validateToken } from '../../auth/tokenService.js';
+import { validateToken, rotateToken } from '../../auth/tokenService.js';
 import { cacheResponse, getCachedResponse } from '../../auth/eapIdempotency.js';
 
 export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
@@ -48,9 +48,17 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           });
         }
 
+        // Rotate: revoke old token, issue new one (rolling expiry)
+        const newToken = await rotateToken(
+          body.token,
+          tokenInfo.subscriberId,
+          tokenInfo.tokenType,
+          clientIp,
+        );
+
         const entitlementData = await fetchEntitlements(tokenInfo.subscriberId, body.app);
         return reply.code(HTTP_STATUS.OK).send({
-          token: body.token,
+          token: newToken.tokenValue,
           ...entitlementData,
         });
       }

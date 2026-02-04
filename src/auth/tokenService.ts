@@ -123,6 +123,31 @@ export async function validateToken(tokenValue: string): Promise<TokenInfo | nul
 }
 
 /**
+ * Revoke a token by deleting it from Redis and marking it consumed in Postgres.
+ */
+export async function revokeToken(tokenValue: string): Promise<void> {
+  await redis.del(tokenCacheKey(tokenValue));
+  await db
+    .update(tokens)
+    .set({ consumed: true })
+    .where(eq(tokens.tokenValue, tokenValue));
+}
+
+/**
+ * Rotate a token: revoke the old one and issue a new one.
+ * Returns the new token info.
+ */
+export async function rotateToken(
+  oldTokenValue: string,
+  subscriberId: string,
+  tokenType: string,
+  clientIp: string,
+): Promise<TokenInfo> {
+  await revokeToken(oldTokenValue);
+  return generateToken(subscriberId, tokenType, clientIp);
+}
+
+/**
  * Find a subscriber by IMSI. Returns the subscriber ID or null.
  */
 export async function findSubscriberByImsi(imsi: string): Promise<string | null> {

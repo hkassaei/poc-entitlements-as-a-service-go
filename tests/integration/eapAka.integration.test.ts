@@ -210,6 +210,58 @@ describe('EAP-AKA Integration', () => {
     });
   });
 
+  describe('Token Rotation', () => {
+    it('rotates the token on fast-auth POST and invalidates the old one', async () => {
+      // First, get a token via generateToken directly (simulating a successful auth)
+      const { generateToken } = await import('../../src/auth/tokenService.js');
+      const { findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
+      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
+      expect(subscriberId).not.toBeNull();
+
+      const token = await generateToken(subscriberId!, 'auth', '127.0.0.1');
+
+      // Use the token in a fast-auth POST
+      const res1 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: token.tokenValue,
+        },
+      });
+
+      expect(res1.statusCode).toBe(200);
+      const body1 = res1.json();
+      expect(body1.token).toBeDefined();
+      expect(body1.token).not.toBe(token.tokenValue); // rotated
+
+      // Old token should be rejected
+      const res2 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: token.tokenValue,
+        },
+      });
+
+      expect(res2.statusCode).toBe(401);
+
+      // New token should work
+      const res3 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: body1.token,
+        },
+      });
+
+      expect(res3.statusCode).toBe(200);
+      expect(res3.json().token).not.toBe(body1.token); // rotated again
+    });
+  });
+
   describe('GET /entitlement', () => {
     it('returns 401 when no token is provided', async () => {
       const res = await app.inject({
