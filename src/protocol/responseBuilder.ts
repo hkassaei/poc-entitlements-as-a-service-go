@@ -17,6 +17,13 @@ import { buildVoLTEConfig } from '../services/volte.js';
 import { buildSmsOipConfig } from '../services/smsoip.js';
 import { buildCompanionConfig } from '../services/odsaCompanion.js';
 import { buildPrimaryConfig } from '../services/odsaPrimary.js';
+import { buildDataPlanConfig } from '../services/dataPlan.js';
+import { buildServerOdsaConfig } from '../services/serverOdsa.js';
+import { buildDcbConfig } from '../services/directCarrierBilling.js';
+import { buildPrivateIdentityConfig } from '../services/privateUserIdentity.js';
+import { buildDeviceUserInfoConfig } from '../services/deviceUserInfo.js';
+import { buildAppAuthConfig } from '../services/appAuthentication.js';
+import { buildSatModeConfig } from '../services/satMode.js';
 import type { OdsaContext } from '../services/odsaCommon.js';
 
 export interface FormattedResponse {
@@ -99,6 +106,20 @@ function buildAppConfig(
       return buildCompanionConfig(status, provStatus, tcStatus, configData, odsaContext);
     case 'ap2009':
       return buildPrimaryConfig(status, provStatus, tcStatus, configData, odsaContext);
+    case 'ap2010':
+      return buildDataPlanConfig(status, provStatus, tcStatus, configData, odsaContext);
+    case 'ap2011':
+      return buildServerOdsaConfig(status, provStatus, tcStatus, configData, odsaContext);
+    case 'ap2012':
+      return buildDcbConfig(status, provStatus, tcStatus, configData);
+    case 'ap2013':
+      return buildPrivateIdentityConfig(status, provStatus, tcStatus, configData);
+    case 'ap2014':
+      return buildDeviceUserInfoConfig(status, provStatus, tcStatus, configData, odsaContext);
+    case 'ap2015':
+      return buildAppAuthConfig(status, provStatus, tcStatus, configData);
+    case 'ap2016':
+      return buildSatModeConfig(status, provStatus, tcStatus, configData);
     default:
       // Generic handler for unsupported app IDs
       return {

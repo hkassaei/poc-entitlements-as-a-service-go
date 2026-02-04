@@ -93,6 +93,99 @@ const seedData: EntitlementSeed[] = [
     },
   },
 
+  // Data Plan (ap2010): enabled with full plan details
+  {
+    imsi: '001010000000001',
+    appId: 'ap2010',
+    status: 1,
+    provStatus: 3,
+    tcStatus: 1,
+    configData: {
+      planName: 'Unlimited Plus',
+      planId: 'PLAN-UNLIMITED-001',
+      dataAllowanceBytes: 107374182400, // 100 GB
+      dataUsedBytes: 21474836480, // 20 GB
+      billingCycleEnd: '2026-03-01',
+      accessType: '5G',
+      dataType: 'metered',
+      boostEligible: true,
+      serviceFlowUrl: 'https://operator.com/plans/boost',
+    },
+  },
+  // Server ODSA (ap2011): active enterprise device
+  {
+    imsi: '001010000000001',
+    appId: 'ap2011',
+    status: 1,
+    provStatus: 3,
+    tcStatus: 1,
+    configData: {
+      enterpriseId: 'ENT-001',
+      smdpAddress: 'smdp.operator.com',
+      profileType: 'default',
+      subscriptionState: 'active',
+    },
+  },
+  // Direct Carrier Billing (ap2012): enabled
+  {
+    imsi: '001010000000001',
+    appId: 'ap2012',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 1,
+    configData: {},
+  },
+  // Private User Identity (ap2013): enabled with pseudonym
+  {
+    imsi: '001010000000001',
+    appId: 'ap2013',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      pseudonym: 'anon-alice-7x9k2',
+      identityType: 'PSEUDONYM',
+    },
+  },
+  // Device/User Info (ap2014): enabled with subscriber details
+  {
+    imsi: '001010000000001',
+    appId: 'ap2014',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      msisdn: '+15551234567',
+      displayName: 'Alice',
+      homeCarrier: 'Test Operator',
+    },
+  },
+  // App Authentication (ap2015): enabled with token endpoint
+  {
+    imsi: '001010000000001',
+    appId: 'ap2015',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      operatorTokenUrl: 'https://auth.operator.com/token',
+      appTokenScope: 'carrier.entitlement',
+    },
+  },
+  // Satellite Mode (ap2016): enabled with PLMN lists
+  {
+    imsi: '001010000000001',
+    appId: 'ap2016',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      plmnAllow: ['00101', '00102'],
+      plmnBarred: ['99999'],
+      serviceConstraints: 'sos-only',
+    },
+  },
+
   // --- Subscriber 2: "Bob" (001010000000002) ---
   // VoWiFi: disabled, needs T&C acceptance
   {
@@ -144,6 +237,82 @@ const seedData: EntitlementSeed[] = [
       smdpAddress: 'smdp.operator.com',
       profileType: 'default',
     },
+  },
+  // Data Plan (ap2010): disabled, no plan assigned
+  {
+    imsi: '001010000000002',
+    appId: 'ap2010',
+    status: 0,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {},
+  },
+  // Server ODSA (ap2011): eligible, needs setup
+  {
+    imsi: '001010000000002',
+    appId: 'ap2011',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      enterpriseId: 'ENT-002',
+      subscriptionState: 'eligible',
+      serviceFlowUrl: 'https://operator.com/enterprise/setup',
+    },
+  },
+  // Direct Carrier Billing (ap2012): disabled, needs T&C
+  {
+    imsi: '001010000000002',
+    appId: 'ap2012',
+    status: 0,
+    provStatus: 0,
+    tcStatus: 2, // REQUIRES_ACCEPTANCE
+    configData: {
+      serviceFlowUrl: 'https://operator.com/terms/dcb',
+    },
+  },
+  // Private User Identity (ap2013): disabled
+  {
+    imsi: '001010000000002',
+    appId: 'ap2013',
+    status: 0,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {},
+  },
+  // Device/User Info (ap2014): enabled
+  {
+    imsi: '001010000000002',
+    appId: 'ap2014',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      msisdn: '+15559876543',
+      displayName: 'Bob',
+      homeCarrier: 'Test Operator',
+    },
+  },
+  // App Authentication (ap2015): enabled
+  {
+    imsi: '001010000000002',
+    appId: 'ap2015',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      operatorTokenUrl: 'https://auth.operator.com/token',
+      appTokenScope: 'carrier.basic',
+    },
+  },
+  // Satellite Mode (ap2016): disabled
+  {
+    imsi: '001010000000002',
+    appId: 'ap2016',
+    status: 0,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {},
   },
 ];
 
