@@ -4,7 +4,7 @@
 
 Imagine you just bought a new phone and popped in your SIM card. You open the dialer and try to make a Wi-Fi call. Before the call connects, your phone silently asks your carrier: *"Is this person allowed to use Wi-Fi Calling?"* The carrier's server checks your subscription, checks your device, and sends back either a green light with configuration details, or a polite refusal.
 
-That silent conversation is what this project implements. It's called an **Entitlement Configuration Server (ECS)** — the carrier-side system that answers the question *"What is this device allowed to do?"* for up to 13 different telecom services: Wi-Fi Calling, VoLTE, SMS over IP, eSIM activation, data plans, carrier billing, satellite connectivity, and more.
+That silent conversation is what this project implements. It's called an **Entitlement Configuration Server (ECS)** — the carrier-side system that answers the question *"What is this device allowed to do?"* for 12 different telecom services: Wi-Fi Calling, VoLTE, SMS over IP, eSIM activation, data plans, carrier billing, satellite connectivity, and more.
 
 The protocol that governs this conversation is **GSMA TS.43** — a 200+ page telecom standard. Our job is to build a server that speaks this protocol fluently.
 
@@ -44,7 +44,7 @@ Here's how a request flows through the system:
          |     |  Fastify HTTP server     |           |
          |     |  EAP-AKA state machine   |           |
          |     |  Token management        |           |
-         |     |  13 service handlers     |           |
+         |     |  12 service handlers     |           |
          |     |  TypeBox validation      |           |
          |     +--+--------+--------+----+           |
          |        |        |        |                 |
@@ -149,7 +149,7 @@ Express is the default choice for Node.js HTTP servers, but we picked **Fastify*
 
 2. **Compiled serialization**: Fastify compiles JSON schemas into fast serializers at startup. Since every response is a structured entitlement config, this matters.
 
-3. **Plugin encapsulation**: Each of the 13 service handlers (VoWiFi, VoLTE, ODSA, etc.) maps naturally to a Fastify plugin with its own routes and hooks.
+3. **Plugin encapsulation**: Each of the 12 service handlers (VoWiFi, VoLTE, ODSA, etc.) maps naturally to a Fastify plugin with its own routes and hooks.
 
 ### TypeBox Over Zod
 
@@ -477,12 +477,279 @@ The companion and primary handlers are pure functions: `(status, provStatus, tcS
 
 **Takeaway:** Keep business logic pure. Push I/O to the edges. Your unit tests will thank you.
 
+## Phase 7: Extended Services — From 5 Services to 12
+
+### What Changed
+
+After Phase 6, the server handled 5 services: VoWiFi (ap2004), VoLTE (ap2003), SMSoIP (ap2005), ODSA Companion (ap2006), and ODSA Primary (ap2009). Phase 7 adds 7 more, bringing the total to 12 — covering nearly every service type in the TS.43 specification.
+
+The new services fall into two categories: **operation-aware** (like ODSA, with sub-routing via the `operation` field) and **simple builders** (like VoWiFi, with just status-based logic).
+
+### The New Services
+
+| App ID | Service | Type | What It Does |
+|--------|---------|------|--------------|
+| ap2010 | Data Plan Info | Operation-aware | Check plan eligibility, acquire plans, get data usage details |
+| ap2011 | Server-Initiated ODSA | Operation-aware | Enterprise-managed eSIM provisioning (same pattern as companion/primary, scoped to enterprise) |
+| ap2012 | Direct Carrier Billing | Simple | Carrier billing entitlement — enabled/disabled with optional T&C acceptance flow |
+| ap2013 | Private User Identity | Simple | Returns pseudonymized subscriber identity when enabled |
+| ap2014 | Device/User Info | Operation-aware | Get phone number or subscriber details |
+| ap2015 | App Authentication | Simple | Returns operator token endpoint URL for app-level auth |
+| ap2016 | Satellite Mode | Simple | Returns PLMN allow/barred lists for satellite connectivity |
+
+### Why This Phase Was Fast (And What That Tells You)
+
+Phase 7 added 7 service handlers, seed data for 14 new entitlement records, 31 unit tests, and wired everything into the response router — and it all worked on the first try. No debugging. No surprises.
+
+That's not because the code was trivial. It's because **Phases 1–6 built the right abstractions.** Every new service handler follows an identical pattern:
+
+```typescript
+export function buildXxxConfig(
+  status: number,
+  provStatus: number,
+  tcStatus: number,
+  configData?: unknown,
+  odsaContext?: OdsaContext,  // only for operation-aware services
+): ApplicationConfig {
+  // Cast configData, route by operation (if applicable), populate extraParams
+}
+```
+
+Adding a new service means:
+1. Create a file with the builder function
+2. Add one `case` statement in `responseBuilder.ts`
+3. Add seed data
+4. Write tests
+
+No new interfaces, no new middleware, no database migrations, no new routes. The `extraParams` bag carries all service-specific response fields through the JSON/XML builders untouched. The TypeBox schema needed one new literal per app ID. That's it.
+
+This is the payoff of the decisions made in earlier phases. The builder pattern, the `extraParams` bag, the operation-based sub-routing, the `configData` JSONB column — they were all designed to make this kind of extension trivial. **Good architecture isn't about the code you write; it's about the code you don't have to write later.**
+
+### The Builder Pattern: Two Flavors
+
+**Simple builders** (ap2012, ap2013, ap2015, ap2016) follow the VoWiFi pattern:
+
+```typescript
+// Direct Carrier Billing (ap2012) — decision matrix
+if (status === EntitlementStatus.INCOMPATIBLE) {
+  result.extraParams = { Message: 'Not available for this device.' };
+} else if (status === DISABLED && tcStatus === REQUIRES_ACCEPTANCE && data.serviceFlowUrl) {
+  result.serviceFlowUrl = data.serviceFlowUrl;  // redirect to T&C portal
+}
+```
+
+Three possible states → three code paths → three tests. No operation routing needed.
+
+**Operation-aware builders** (ap2010, ap2011, ap2014) follow the ODSA pattern:
+
+```typescript
+// Data Plan (ap2010) — operation sub-routing
+switch (operation) {
+  case 'CheckEligibility': return handleCheckEligibility(...);
+  case 'AcquirePlan':      return handleAcquirePlan(...);
+  case 'GetPlanDetails':   return handleGetPlanDetails(...);
+  default:                 return basicStatus;
+}
+```
+
+Each operation handler is a small pure function. The `buildOdsaBaseConfig()` helper (from `odsaCommon.ts`) stamps in the `SubscriptionResult` and any extra fields. Server-Initiated ODSA (`ap2011`) even reuses the mock SM-DP+ activation codes for profile downloads.
+
+### The Seed Data Strategy
+
+Every service gets seed data for both test subscribers:
+
+- **Alice** gets "everything enabled with rich config" — full plan details, PLMN lists, pseudonyms, token endpoints. This exercises the happy path and verifies that all `extraParams` fields propagate correctly.
+- **Bob** gets "a mix of enabled and disabled" — some services need T&C acceptance, some are completely off. This tests the decision branches and verifies that disabled services don't leak config data.
+
+The pattern is intentional: one subscriber tests "everything works," the other tests "everything fails gracefully."
+
+### The File Map
+
+```
+src/services/
+  dataPlan.ts             — ap2010: CheckEligibility, AcquirePlan, GetPlanDetails
+  serverOdsa.ts           — ap2011: CheckEligibility, ManageSubscription, ManageService
+  directCarrierBilling.ts — ap2012: INCOMPATIBLE/DISABLED/ENABLED decision matrix
+  privateUserIdentity.ts  — ap2013: pseudonym when enabled
+  deviceUserInfo.ts       — ap2014: GetPhoneNumber, GetSubscriberInfo
+  appAuthentication.ts    — ap2015: token endpoint when enabled
+  satMode.ts              — ap2016: PLMN allow/barred lists when enabled
+
+tests/unit/
+  extendedServices.test.ts — 31 tests covering all 7 new builders
+```
+
+---
+
+## The Integration Test Fix: A Lesson in Self-Sufficient Tests
+
+### The Bug
+
+After implementing Phase 7, we noticed 4 integration tests had been failing since Phase 6. They all returned `SubscriptionResult='3'` (DONE) instead of `'2'` (DOWNLOAD_PROFILE) or `'1'` (CONTINUE_TO_WS). The unit tests passed fine.
+
+### The Investigation
+
+The integration tests go through the full HTTP stack: `POST /entitlement` → route handler → database lookup → service handler → response. The unit tests call the service handlers directly with test data.
+
+The root cause was embarrassingly simple: **the database was empty.** The ODSA seed data (ap2006, ap2009 entitlement records) was added to `seed-entitlements.ts` in Phase 6, but nobody ran the seed script against the database after that. Without entitlement records, `responseBuilder.ts` fell back to defaults: `configData=undefined`. And when the ODSA handlers got `undefined` config data, they cast it to `{}` — which has no `subscriptionState`, no `smdpAddress`, no `serviceFlowUrl` — so every operation fell through to the default `SubscriptionResult.DONE`.
+
+The tricky part: the tests didn't crash. They got valid responses with the wrong data. Silent failures are the worst kind of failures.
+
+### The Real Fix (Not Just Running the Seed)
+
+Running `npx tsx src/db/seed-entitlements.ts` fixed the tests immediately. But that's not a fix — it's a band-aid. The next person to clone the repo, or the next time someone resets the database, the same tests would break again with no obvious explanation.
+
+The real fix had three parts:
+
+**1. Make the seed script importable.** Before, it was a standalone script that called `seed()` at the top level. We refactored it to export a `seedEntitlements()` function, with the top-level call gated behind a check for direct execution:
+
+```typescript
+export async function seedEntitlements(dbUrl?: string) { /* ... */ }
+
+const isDirectRun = process.argv[1]?.includes('seed-entitlements');
+if (isDirectRun) {
+  seedEntitlements().catch(/* ... */);
+}
+```
+
+**2. Create a vitest `globalSetup` hook.** The `tests/integration/setup.ts` file calls `seedEntitlements()` before any test file runs:
+
+```typescript
+import { seedEntitlements } from '../../src/db/seed-entitlements.js';
+
+export async function setup() {
+  await seedEntitlements(databaseUrl);
+}
+```
+
+**3. Wire it up in `vitest.config.ts`:**
+
+```typescript
+export default defineConfig({
+  test: {
+    globalSetup: ['./tests/integration/setup.ts'],
+  },
+});
+```
+
+Now `npm test` seeds the database automatically. The seed uses `ON CONFLICT ... DO UPDATE`, so it's idempotent — safe to run every time. The integration tests are self-sufficient.
+
+**4. Fix a hidden test landmine.** The "no entitlement for subscriber+app" test was using `ap2010` — which *did* have no entitlement for Alice before Phase 7, but now does. We changed it to use `ap2005` for Bob (who genuinely has no SMSoIP entitlement). And we couldn't use a made-up app ID like `ap2099` because the Fastify request schema validates `app` against a union of known app IDs, and would reject it with a 400 before it even reached the handler.
+
+### Lessons From This Bug
+
+#### 1. Integration Tests Must Own Their Data
+
+Integration tests that depend on "someone ran a seed script at some point" are time bombs. Every test suite should be able to set up its own preconditions. Vitest's `globalSetup` is purpose-built for this — it runs once before all test files, not once per file.
+
+**Takeaway:** If a test depends on database state, the test (or its setup) must create that state. Manual setup steps are a form of technical debt that compounds silently.
+
+#### 2. Silent Failures Are Worse Than Crashes
+
+The tests didn't crash — they got `SubscriptionResult='3'` instead of `'2'`. The assertions caught the difference, but without understanding the system, the error message "expected '2' to be '3'" gives no clue about the root cause. If the handlers had thrown an error on missing `configData` (e.g., `assert(data.subscriptionState, 'configData.subscriptionState required for ManageSubscription')`), the bug would have been obvious instantly.
+
+**Takeaway:** When a function receives data from the database and silently falls through to a default, consider whether that default is actually correct for the context. Sometimes "fail loudly" is better than "degrade gracefully."
+
+#### 3. Test Data Assumptions Rot Over Time
+
+The test assumed Alice had no ap2010 entitlement. That was true when the test was written. Phase 7 added one. The test still passed (because the status value happened to match), but it was no longer testing what it claimed to test. Using a subscriber+app combo that's *structurally* guaranteed to have no record (Bob + ap2005, which is simply never seeded) is more robust than depending on "this particular app ID hasn't been added yet."
+
+**Takeaway:** When writing a test for "missing data," choose test fixtures that are explicitly excluded from seed data — not ones that just happen to be absent today.
+
+#### 4. Idempotent Seeds Are Infrastructure
+
+The seed script's `ON CONFLICT ... DO UPDATE` clause is what makes this whole approach work. Without it, running the seed twice would crash with a unique constraint violation. With it, you can run it on every test invocation without worry. This pattern — "ensure state exists, creating or updating as needed" — is called **upsert**, and it's essential for any setup script that might run more than once.
+
+**Takeaway:** Seed scripts should always be idempotent. Use `ON CONFLICT DO UPDATE` (Postgres), `INSERT ... ON DUPLICATE KEY UPDATE` (MySQL), or your ORM's equivalent.
+
+---
+
+## The Full Architecture (After Phase 7)
+
+```
+src/
+├── index.ts                          # Entry point: OTel → dotenv → start server
+├── config/
+│   ├── index.ts                      # Typed config from env vars
+│   ├── constants.ts                  # 12 AppIDs, HTTP codes, EAP constants, token types
+│   ├── logger.ts                     # Pino logger with Cloud Logging severity
+│   ├── tracing.ts                    # OpenTelemetry (HTTP, pg, ioredis instrumentation)
+│   └── metrics.ts                    # OTel metrics provider
+├── db/
+│   ├── schema.ts                     # 5 tables: subscribers, devices, entitlements, tokens, audit_log
+│   ├── index.ts                      # PostgreSQL pool + Drizzle ORM
+│   ├── redis.ts                      # IORedis client (lazy connect)
+│   └── seed-entitlements.ts          # Idempotent seed (23 records, exportable function)
+├── auth/
+│   ├── eapAka.ts                     # EAP-AKA state machine (2 round-trips)
+│   ├── eapCodec.ts                   # Binary EAP packet encoder/decoder (RFC 4187)
+│   ├── keyDerivation.ts              # SHA-1 PRF + HMAC-MAC (FIPS 186-2)
+│   ├── eapAkaVectors.ts              # HTTP client → mock HSS
+│   ├── eapSession.ts                 # Redis session store (90s TTL)
+│   ├── eapIdempotency.ts             # Redis replay cache (90s TTL)
+│   └── tokenService.ts              # Token CRUD + rotation + temporary tokens
+├── protocol/
+│   ├── requestSchemas.ts             # TypeBox: 12 app IDs, 7 ODSA operations
+│   ├── requestTypes.ts               # Derived TypeScript types
+│   ├── responseTypes.ts              # ApplicationConfig, ServiceEntitlementResponse
+│   ├── statusCodes.ts                # Entitlement/Service/Prov/TC/SubscriptionResult codes
+│   ├── appIds.ts                     # APP_ID constants
+│   ├── responseBuilder.ts            # Router: appId → service handler → format
+│   ├── jsonBuilder.ts                # TS.43 JSON formatter
+│   └── xmlBuilder.ts                 # WAP-Provisioning XML formatter
+├── services/                         # 12 service handlers
+│   ├── vowifi.ts                     # ap2004 — Wi-Fi Calling
+│   ├── volte.ts                      # ap2003 — VoLTE/VoNR
+│   ├── smsoip.ts                     # ap2005 — SMS over IP
+│   ├── odsaCommon.ts                 # Shared ODSA types + buildOdsaBaseConfig
+│   ├── odsaCompanion.ts              # ap2006 — eSIM companion device
+│   ├── odsaPrimary.ts                # ap2009 — eSIM primary device
+│   ├── mockSmdp.ts                   # 3 canned eSIM activation codes
+│   ├── dataPlan.ts                   # ap2010 — Data plan info
+│   ├── serverOdsa.ts                 # ap2011 — Server-initiated ODSA
+│   ├── directCarrierBilling.ts       # ap2012 — Carrier billing
+│   ├── privateUserIdentity.ts        # ap2013 — Pseudonymized identity
+│   ├── deviceUserInfo.ts             # ap2014 — Phone number + subscriber info
+│   ├── appAuthentication.ts          # ap2015 — Operator token endpoint
+│   └── satMode.ts                    # ap2016 — Satellite PLMN lists
+└── server/
+    ├── app.ts                        # Fastify setup + lifecycle hooks
+    ├── routes/
+    │   ├── entitlement.ts            # POST/GET /entitlement (3-path routing)
+    │   └── health.ts                 # GET /health
+    └── middleware/
+        ├── requestParser.ts          # GET/POST normalization
+        ├── userAgent.ts              # TS.43 User-Agent parsing
+        ├── versionCheck.ts           # Version validation → 406
+        └── errorHandler.ts           # Centralized error responses
+
+tests/
+├── unit/                             # 6 test files, ~120 tests, run in ~15ms
+│   ├── eapCodec.test.ts
+│   ├── keyDerivation.test.ts
+│   ├── tokenService.test.ts
+│   ├── responseBuilder.test.ts
+│   ├── odsa.test.ts
+│   └── extendedServices.test.ts
+└── integration/                      # 2 test files, ~20 tests, require Docker
+    ├── setup.ts                      # globalSetup: auto-seeds DB before tests
+    ├── eapAka.integration.test.ts
+    └── odsa.integration.test.ts
+
+vitest.config.ts                      # globalSetup wiring
+docker-compose.yml                    # Postgres + Redis + mock-hss + ecs
+Dockerfile                            # Multi-stage (builder → runner)
+```
+
+**140 tests. 10 test files. All green.**
+
+---
+
 ## What's Coming Next
 
 - **Deployment**: Google Cloud Run with managed TLS, Cloud Armor DDoS protection, and VPC Service Controls
-- **More ODSA operations**: Server-initiated ODSA (ap2011), data plan info (ap2010)
-
-Now if you `curl` the entitlement endpoint with an ODSA operation, you get real eSIM activation codes back!
+- **Observability**: Wiring OTel traces to Cloud Trace, structured logs to Cloud Logging
+- **Production hardening**: Rate limiting, request signing, SQN synchronization
 
 ---
 
