@@ -17,6 +17,7 @@ export interface Config {
   operatorMcc: string;
   operatorMnc: string;
   operatorName: string;
+  gcpProjectId: string;
   nodeEnv: string;
 }
 
@@ -26,10 +27,10 @@ function envOrDefault(key: string, fallback: string): string {
 
 export function loadConfig(): Config {
   return {
-    port: parseInt(envOrDefault('PORT', '8443'), 10),
+    port: parseInt(envOrDefault('PORT', '8080'), 10),
     host: envOrDefault('HOST', '0.0.0.0'),
     databaseUrl: envOrDefault('DATABASE_URL', 'postgresql://ecs:password@localhost:5432/entitlements'),
-    dbPoolSize: parseInt(envOrDefault('DB_POOL_SIZE', '5'), 10),
+    dbPoolSize: parseInt(envOrDefault('DB_POOL_SIZE', '2'), 10),
     redisUrl: envOrDefault('REDIS_URL', 'redis://localhost:6379'),
     hssUrl: envOrDefault('HSS_URL', 'http://mock-hss:3001'),
     authTokenTtlSeconds: parseInt(envOrDefault('AUTH_TOKEN_TTL_SECONDS', '86400'), 10),
@@ -44,6 +45,7 @@ export function loadConfig(): Config {
     operatorMcc: envOrDefault('OPERATOR_MCC', '001'),
     operatorMnc: envOrDefault('OPERATOR_MNC', '01'),
     operatorName: envOrDefault('OPERATOR_NAME', 'TestOperator'),
+    gcpProjectId: envOrDefault('GCP_PROJECT_ID', ''),
     nodeEnv: envOrDefault('NODE_ENV', 'development'),
   };
 }

@@ -745,11 +745,182 @@ Dockerfile                            # Multi-stage (builder → runner)
 
 ---
 
+## Phase 8: GCP Infrastructure & CI/CD — Taking It to the Cloud
+
+### The Transition
+
+Up to Phase 7, the server ran in Docker Compose on a developer's laptop. Phase 8 answers the question every POC eventually faces: *"How do we deploy this for real?"*
+
+We chose **Google Cloud Platform** with a specific opinionated stack:
+- **Cloud Run** for containerized services (serverless, auto-scaling, pay-per-use)
+- **Cloud SQL** for PostgreSQL (managed, private IP, automated backups)
+- **Memorystore** for Redis (managed, VPC-connected)
+- **Cloud KMS** for key management (hardware-backed, never exposes the KEK)
+- **Cloud Build** for CI/CD (build, test, deploy on every push to main)
+- **Cloud Armor** for WAF (rate limiting, SQL injection, XSS protection)
+- **Terraform** for infrastructure-as-code (reproducible, reviewable, version-controlled)
+
+### The Cloud KMS Upgrade: From XOR to Hardware Security
+
+Remember the envelope encryption we built in Phase 2? The mock HSS stores subscriber Ki values encrypted with per-subscriber DEKs, and those DEKs are wrapped with a KEK. In development, the KEK is a hex string in an environment variable, and "wrapping" is just XOR.
+
+In production, that's not acceptable. XOR is reversible — if an attacker gets the environment variable, they can unwrap every DEK. Cloud KMS solves this by storing the KEK in **tamper-proof hardware**. The key never leaves the HSM. The mock HSS sends a wrapped DEK to KMS and gets back the unwrapped DEK. Even if the VM is compromised, the attacker can't extract the KEK.
+
+The clever part of our implementation: we made the `KeyManager` interface async-compatible:
+
+```typescript
+export interface KeyManager {
+  unwrapDek(wrappedDek: Buffer): Buffer | Promise<Buffer>;
+}
+```
+
+`LocalKeyManager.unwrapDek()` returns a synchronous `Buffer` (XOR is instant). `CloudKmsKeyManager.unwrapDek()` returns a `Promise<Buffer>` (network call to KMS). TypeScript's union type lets both satisfy the interface. The call site uses `await`, which works identically for both sync and async values.
+
+The lazy import pattern is worth noting:
+
+```typescript
+async unwrapDek(wrappedDek: Buffer): Promise<Buffer> {
+  if (!this.client) {
+    const { KeyManagementServiceClient } = await import('@google-cloud/kms');
+    this.client = new KeyManagementServiceClient();
+  }
+  // ...
+}
+```
+
+By dynamically importing `@google-cloud/kms` only when first needed, we avoid requiring the GCP SDK in development environments where it's not installed.
+
+### The Port 8080 Convention
+
+A small but important change: the default port went from 8443 to 8080. Cloud Run expects containers to listen on the port specified by the `PORT` environment variable (which defaults to 8080). Using a non-standard port would require explicit configuration on every deployment and confuse anyone familiar with Cloud Run conventions.
+
+### Connection Pool Tuning: Less Is More
+
+The default `DB_POOL_SIZE` changed from 5 to 2. This seems counterintuitive — "wouldn't more connections be faster?" In a serverless environment, each Cloud Run instance is ephemeral. If you have 10 instances each holding 5 connections, that's 50 connections to Cloud SQL. Cloud SQL's `db-f1-micro` tier supports maybe 25 concurrent connections. You'd hit the limit and start getting connection refused errors.
+
+With pool size 2, even at max scale (10 instances × 2 connections = 20), you stay well within limits. The lesson: **serverless connection pools should be small**. The platform scales horizontally; individual instances should be modest.
+
+### Terraform: Infrastructure as Code
+
+The `terraform/` directory contains 9 modules, each responsible for one GCP resource group:
+
+```
+terraform/
+├── main.tf                     # Provider, API enablement, module wiring
+├── variables.tf                # project_id, region, db_tier, etc.
+├── outputs.tf                  # Deployed URLs and connection info
+├── terraform.tfvars.example    # Template for real values
+├── modules/
+│   ├── networking/             # VPC, private subnet, serverless VPC connector
+│   ├── database/               # Cloud SQL PostgreSQL 16 (private IP only)
+│   ├── redis/                  # Memorystore Redis 7 (VPC-connected)
+│   ├── kms/                    # KMS keyring + crypto key (90-day rotation)
+│   ├── secrets/                # Secret Manager (DATABASE_URL, REDIS_URL)
+│   ├── artifact-registry/      # Docker image repository (keeps last 10)
+│   ├── cloud-run/              # ECS (public) + mock-hss (internal only)
+│   ├── cloud-armor/            # WAF: rate limit, SQLi, XSS protection
+│   └── iam/                    # 3 service accounts with least-privilege roles
+```
+
+The dependency graph flows bottom-up: `networking` → `database`/`redis` → `kms`/`secrets` → `cloud-run`. Terraform resolves this automatically from module references.
+
+The most important security decision: **mock-hss has `INGRESS_TRAFFIC_INTERNAL_ONLY`**. It cannot be reached from the internet. Only the ECS Cloud Run service (which is inside the same VPC) can call it.
+
+### CI/CD: Every Push Deploys
+
+The `cloudbuild.yaml` defines a 13-step pipeline:
+
+1. Install dependencies (ECS + mock-hss in parallel)
+2. TypeScript compile (both)
+3. Run unit tests
+4. Build Docker images (tagged with commit SHA + `latest`)
+5. Push images to Artifact Registry
+6. Run database migrations (via Cloud SQL Proxy)
+7. Deploy mock-hss to Cloud Run
+8. Deploy ECS to Cloud Run
+9. Smoke test: `curl /health`
+
+The key ordering constraint: mock-hss deploys *before* ECS. The ECS Cloud Run service references mock-hss's URL (injected as the `HSS_URL` environment variable). If ECS deployed first and mock-hss was down, health checks would fail.
+
+### The Migration Runner
+
+Database migrations don't run at container startup. This avoids a nasty race condition: Cloud Run can spin up multiple instances simultaneously. If two instances both try to apply the same migration, you get a partial migration or a deadlock.
+
+Instead, migrations run as a dedicated Cloud Build step (`src/db/migrate.ts`) *before* any containers are deployed. One migration run, then N instances can start safely.
+
+### Lessons From Phase 8
+
+#### 1. Terraform Modules as Boundaries of Responsibility
+
+Each module has exactly three files: `main.tf` (resources), `variables.tf` (inputs), `outputs.tf` (outputs). A module doesn't reach into another module's state — it only uses declared outputs. This is the same principle as function parameters and return values: explicit interfaces make dependencies visible.
+
+**Takeaway:** When your infrastructure has more than 5 resources, modularize it. The module boundaries should map to your mental model of the system ("the database," "the networking layer"), not to arbitrary file size limits.
+
+#### 2. Secrets Belong in Secret Manager, Not Environment Variables
+
+Our Terraform creates secrets in Secret Manager and injects them into Cloud Run as environment variables *from* Secret Manager. The `terraform.tfvars` file (which holds the GCP project ID, not secrets) is in `.gitignore`. The actual database password is generated by Terraform's `random_password` resource — no human ever sees or types it.
+
+**Takeaway:** If a value is sensitive, it should flow from a secrets manager to the runtime environment automatically. Humans should never copy-paste passwords.
+
+#### 3. Cloud Armor Rules Are Cheap Insurance
+
+SQL injection and XSS protection rules are pre-configured in Google's WAF. Enabling them costs nothing extra and blocks common attack patterns. Rate limiting at 100 req/s per IP prevents abuse without affecting legitimate traffic.
+
+**Takeaway:** WAF rules are almost always worth enabling. They're not a substitute for input validation in your code, but they catch attacks before your code even runs.
+
+#### 4. Service Accounts as Identity Boundaries
+
+We created three service accounts with distinct, minimal permissions:
+- `ecs-runner`: Cloud SQL + Secret Manager + Cloud Trace (no KMS access)
+- `mock-hss-runner`: Cloud SQL + Secret Manager + KMS decrypt + Cloud Trace
+- `cloud-build-deployer`: Cloud Run admin + Artifact Registry + Secret Manager
+
+The ECS cannot decrypt subscriber keys. The mock HSS cannot deploy new versions. The build system cannot decrypt subscriber keys. Each account can do exactly what it needs and nothing more.
+
+**Takeaway:** Least-privilege isn't just a security checkbox. It's a design constraint that makes your system's trust boundaries explicit.
+
+---
+
+## The Full Architecture (After Phase 8)
+
+```
+src/
+├── index.ts                          # Entry point: OTel → dotenv → start server
+├── config/
+│   ├── index.ts                      # Typed config (port 8080, pool size 2, GCP_PROJECT_ID)
+│   ├── constants.ts                  # 12 AppIDs, HTTP codes, EAP-AKA attributes
+│   ├── logger.ts                     # Pino logger with Cloud Logging severity
+│   ├── tracing.ts                    # OpenTelemetry (HTTP, pg, ioredis)
+│   └── metrics.ts                    # OTel metrics provider
+├── db/
+│   ├── schema.ts                     # 5 tables
+│   ├── index.ts                      # PostgreSQL pool + Drizzle ORM
+│   ├── redis.ts                      # IORedis client (lazy connect)
+│   ├── migrate.ts                    # Migration runner (Cloud Build step)
+│   └── seed-entitlements.ts          # Idempotent seed (23 records)
+├── auth/                             # EAP-AKA + token management
+├── protocol/                         # Request schemas, response types, builders
+├── services/                         # 12 service handlers
+└── server/                           # Fastify app + routes + middleware
+
+mock-hss/src/
+├── config.ts                         # KMS env vars (LOCAL_KEK_HEX or GCP KMS)
+├── kms.ts                            # LocalKeyManager + CloudKmsKeyManager
+├── index.ts                          # Key manager selection via createKeyManager()
+└── ...
+
+terraform/                            # 9 modules: networking, database, redis, kms,
+│                                     # secrets, artifact-registry, cloud-run,
+│                                     # cloud-armor, iam
+cloudbuild.yaml                       # 13-step CI/CD pipeline
+```
+
+---
+
 ## What's Coming Next
 
-- **Deployment**: Google Cloud Run with managed TLS, Cloud Armor DDoS protection, and VPC Service Controls
-- **Observability**: Wiring OTel traces to Cloud Trace, structured logs to Cloud Logging
-- **Production hardening**: Rate limiting, request signing, SQN synchronization
+- **Phase 9: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
+- **Phase 10: Testing & Hardening**: Load testing, error handling audit, logging completeness
 
 ---
 
@@ -763,7 +934,7 @@ docker compose up --build      # Start Postgres + Redis + Mock HSS + ECS
 docker compose exec mock-hss npx tsx src/seed.ts
 
 # Test the EAP-AKA challenge (Round Trip 1):
-curl -s -X POST http://localhost:8443/entitlement \
+curl -s -X POST http://localhost:8080/entitlement \
   -H 'Content-Type: application/json' \
   -d '{"app":"ap2004","terminal_id":"12345678901234","entitlement_version":"2","imsi":"001010000000001"}' \
   -D -

@@ -19,6 +19,6 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 
-EXPOSE 8443
+EXPOSE 8080
 
 CMD ["node", "dist/index.js"]

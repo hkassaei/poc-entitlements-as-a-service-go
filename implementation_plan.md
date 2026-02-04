@@ -1576,14 +1576,24 @@ code.
 3. Direct Carrier Billing (ap2012)
 4. Remaining services (ap2013–ap2016) as stubs with correct response format
 
-### Phase 8: Observability
+### Phase 8: GCP Infrastructure & CI/CD
+1. Generate Drizzle migration files and create migration runner script
+2. Implement CloudKmsKeyManager in mock-hss/src/kms.ts (alongside existing LocalKeyManager)
+3. Update Dockerfiles and config defaults for Cloud Run (port 8080, pool size tuning)
+4. Terraform modules: networking (VPC, subnets, VPC connector), database (Cloud SQL), redis (Memorystore), kms (keyring + crypto key), secrets (Secret Manager), artifact-registry, iam (service accounts), cloud-run (ECS + mock-hss), cloud-armor (WAF policy)
+5. CI/CD pipeline: cloudbuild.yaml (build, test, push, migrate, deploy)
+6. Cloud Build trigger (Terraform-managed, GitHub push to main)
+7. Initial deployment: terraform apply, first image push, migrations, seed data
+8. Smoke test: verify health endpoints, EAP-AKA challenge, Cloud Logging + Cloud Trace
+
+### Phase 9: Observability
 1. Custom application metrics (EAP-AKA counters, token cache hit ratio, HSS latency, DB pool utilization)
 2. Custom spans for business logic (EAP-AKA phases, entitlement service routing)
 3. Cloud Monitoring dashboard (request rate, error rate, latency, cache hits, pool utilization)
 4. Alerting policies (error rate, auth latency, HSS degradation, pool saturation, instance ceiling)
 5. Verify trace-log correlation (Cloud Trace → Cloud Logging linkage)
 
-### Phase 9: Testing & Hardening
+### Phase 10: Testing & Hardening
 1. Unit tests for all codec/crypto functions
 2. Integration tests for each entitlement flow
 3. Load testing with simulated device traffic

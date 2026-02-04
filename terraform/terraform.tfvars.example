@@ -1,0 +1,12 @@
+# Copy this file to terraform.tfvars and fill in values
+project_id    = "your-gcp-project-id"
+region        = "us-central1"
+db_tier       = "db-f1-micro"
+db_ha_enabled = false
+operator_mcc  = "001"
+operator_mnc  = "01"
+operator_name = "TestOperator"
+
+# After first build, update these with actual image URIs:
+# ecs_image      = "us-central1-docker.pkg.dev/your-project/entitlements/ecs:latest"
+# mock_hss_image = "us-central1-docker.pkg.dev/your-project/entitlements/mock-hss:latest"

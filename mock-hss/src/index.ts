@@ -4,11 +4,11 @@ import { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import { eq } from 'drizzle-orm';
 import { config } from './config.js';
 import { db, pool, subscribers } from './db.js';
-import { LocalKeyManager } from './kms.js';
+import { createKeyManager } from './kms.js';
 import { decryptWithDek, zeroBuffer } from './kms.js';
 import { generateVectors } from './milenage.js';
 
-const keyManager = new LocalKeyManager(config.localKekHex);
+const keyManager = createKeyManager(config);
 
 const app = Fastify({
   logger: {
@@ -66,7 +66,7 @@ app.post(
     }
 
     // Unwrap DEK and decrypt Ki/OP
-    const dek = keyManager.unwrapDek(subscriber.kiDekWrapped);
+    const dek = await keyManager.unwrapDek(subscriber.kiDekWrapped);
     const ki = decryptWithDek(dek, subscriber.kiEncrypted);
     const op = decryptWithDek(dek, subscriber.opEncrypted);
 

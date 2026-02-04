@@ -44,7 +44,7 @@ export function zeroBuffer(buf: Buffer): void {
 
 /** Key manager interface for abstracting key unwrapping. */
 export interface KeyManager {
-  unwrapDek(wrappedDek: Buffer): Buffer;
+  unwrapDek(wrappedDek: Buffer): Buffer | Promise<Buffer>;
 }
 
 /** Local key manager using a KEK from environment (dev only). */
@@ -61,4 +61,57 @@ export class LocalKeyManager implements KeyManager {
   unwrapDek(wrappedDek: Buffer): Buffer {
     return unwrapDek(this.kek, wrappedDek);
   }
+}
+
+/**
+ * Cloud KMS key manager for production use.
+ * Uses Google Cloud KMS to decrypt (unwrap) DEKs via envelope encryption.
+ * The wrapped DEK was encrypted with the KMS key, so we call KMS decrypt to recover it.
+ */
+export class CloudKmsKeyManager implements KeyManager {
+  private readonly keyName: string;
+  private client: any; // Lazy-loaded @google-cloud/kms client
+
+  constructor(projectId: string, locationId: string, keyRingId: string, keyId: string) {
+    this.keyName = `projects/${projectId}/locations/${locationId}/keyRings/${keyRingId}/cryptoKeys/${keyId}`;
+  }
+
+  async unwrapDek(wrappedDek: Buffer): Promise<Buffer> {
+    if (!this.client) {
+      // Lazy import to avoid requiring @google-cloud/kms in dev environments
+      const { KeyManagementServiceClient } = await import('@google-cloud/kms');
+      this.client = new KeyManagementServiceClient();
+    }
+
+    const [result] = await this.client.decrypt({
+      name: this.keyName,
+      ciphertext: wrappedDek,
+    });
+
+    return Buffer.from(result.plaintext as Uint8Array);
+  }
+}
+
+/** Create the appropriate key manager based on environment configuration. */
+export function createKeyManager(config: {
+  localKekHex: string;
+  gcpProjectId: string;
+  kmsLocation: string;
+  kmsKeyRing: string;
+  kmsKeyName: string;
+}): KeyManager {
+  if (config.localKekHex) {
+    return new LocalKeyManager(config.localKekHex);
+  }
+
+  if (!config.gcpProjectId) {
+    throw new Error('Either LOCAL_KEK_HEX or GCP_PROJECT_ID must be set');
+  }
+
+  return new CloudKmsKeyManager(
+    config.gcpProjectId,
+    config.kmsLocation,
+    config.kmsKeyRing,
+    config.kmsKeyName,
+  );
 }
