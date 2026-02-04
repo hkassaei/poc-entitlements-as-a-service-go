@@ -1,21 +1,19 @@
 import type { FastifyInstance } from 'fastify';
-import { eq } from 'drizzle-orm';
 import { EntitlementRequestBody, EntitlementRequestQuery } from '../../protocol/requestSchemas.js';
 import { HTTP_STATUS } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
-import { db } from '../../db/index.js';
-import { entitlements } from '../../db/schema.js';
 import { handleInitialRequest, handleEapResponse } from '../../auth/eapAka.js';
 import { HssSubscriberNotFoundError } from '../../auth/eapAkaVectors.js';
 import { validateToken, rotateToken } from '../../auth/tokenService.js';
 import { cacheResponse, getCachedResponse } from '../../auth/eapIdempotency.js';
+import { buildEntitlementResponse } from '../../protocol/responseBuilder.js';
 
 export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /entitlement — three-path routing:
    *
-   * 1. token present       → validate → 200 with entitlements
-   * 2. eap_relay present   → EAP-AKA Round Trip 2 → 200 + token
+   * 1. token present       → validate → rotate → 200 with TS.43 response
+   * 2. eap_relay present   → EAP-AKA Round Trip 2 → 200 + token + TS.43 response
    * 3. neither (initial)   → EAP-AKA Round Trip 1 → 401 + challenge
    */
   app.post(
@@ -33,6 +31,7 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         imsi?: string;
         token?: string;
         eap_relay?: string;
+        accept_content_type?: string;
       };
 
       const clientIp = request.ip;
@@ -56,11 +55,17 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           clientIp,
         );
 
-        const entitlementData = await fetchEntitlements(tokenInfo.subscriberId, body.app);
-        return reply.code(HTTP_STATUS.OK).send({
-          token: newToken.tokenValue,
-          ...entitlementData,
-        });
+        const formatted = await buildEntitlementResponse(
+          newToken.tokenValue,
+          tokenInfo.subscriberId,
+          body.app,
+          body.accept_content_type,
+        );
+
+        return reply
+          .code(HTTP_STATUS.OK)
+          .type(formatted.contentType)
+          .send(formatted.body);
       }
 
       // --- Path 2: EAP-AKA Response (eap_relay present) ---
@@ -84,17 +89,33 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         const result = await handleEapResponse(body.eap_relay, sessionId, clientIp);
 
         if (result.statusCode === 200 && result.token) {
-          const entitlementData = await fetchEntitlements(result.subscriberId!, body.app);
-          const response = {
-            token: result.token,
+          const formatted = await buildEntitlementResponse(
+            result.token,
+            result.subscriberId!,
+            body.app,
+            body.accept_content_type,
+          );
+
+          // For idempotency cache, always store the JSON representation
+          const cacheData = typeof formatted.body === 'string'
+            ? { _xml: formatted.body, eap_relay: result.eapRelay }
+            : { ...(formatted.body as object), eap_relay: result.eapRelay };
+
+          await cacheResponse(sessionId, body.eap_relay, cacheData);
+
+          if (typeof formatted.body === 'string') {
+            // XML response — prepend eap_relay info is not applicable in XML
+            // Return the XML body directly
+            return reply
+              .code(HTTP_STATUS.OK)
+              .type(formatted.contentType)
+              .send(formatted.body);
+          }
+
+          return reply.code(HTTP_STATUS.OK).send({
+            ...(formatted.body as object),
             eap_relay: result.eapRelay,
-            ...entitlementData,
-          };
-
-          // Cache success for idempotency
-          await cacheResponse(sessionId, body.eap_relay, response);
-
-          return reply.code(HTTP_STATUS.OK).send(response);
+          });
         }
 
         // Auth failed
@@ -139,7 +160,7 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
   );
 
   /**
-   * GET /entitlement — requires a valid token.
+   * GET /entitlement — requires a valid token. Read-only, no rotation.
    */
   app.get(
     '/entitlement',
@@ -154,6 +175,7 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         terminal_id: string;
         entitlement_version: string;
         token?: string;
+        accept_content_type?: string;
       };
 
       if (!query.token) {
@@ -173,50 +195,17 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const entitlementData = await fetchEntitlements(tokenInfo.subscriberId, query.app);
-      return reply.code(HTTP_STATUS.OK).send({
-        token: query.token,
-        ...entitlementData,
-      });
+      const formatted = await buildEntitlementResponse(
+        query.token,
+        tokenInfo.subscriberId,
+        query.app,
+        query.accept_content_type,
+      );
+
+      return reply
+        .code(HTTP_STATUS.OK)
+        .type(formatted.contentType)
+        .send(formatted.body);
     },
   );
-}
-
-/**
- * Fetch entitlement data for a subscriber and app.
- * Returns a default "enabled" response if no specific entitlement is configured.
- */
-async function fetchEntitlements(
-  subscriberId: string,
-  appId: string,
-): Promise<object> {
-  const rows = await db
-    .select()
-    .from(entitlements)
-    .where(eq(entitlements.subscriberId, subscriberId))
-    .limit(10);
-
-  const appEntitlement = rows.find((e) => e.appId === appId);
-
-  if (appEntitlement) {
-    return {
-      entitlement: {
-        appId: appEntitlement.appId,
-        status: appEntitlement.status,
-        provStatus: appEntitlement.provStatus,
-        tcStatus: appEntitlement.tcStatus,
-        configData: appEntitlement.configData,
-      },
-    };
-  }
-
-  // Default: service entitled but no specific config
-  return {
-    entitlement: {
-      appId,
-      status: 1, // ENABLED
-      provStatus: 0, // NOT_NEEDED
-      tcStatus: 0, // NOT_PROVIDED
-    },
-  };
 }

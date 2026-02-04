@@ -232,8 +232,12 @@ describe('EAP-AKA Integration', () => {
 
       expect(res1.statusCode).toBe(200);
       const body1 = res1.json();
-      expect(body1.token).toBeDefined();
-      expect(body1.token).not.toBe(token.tokenValue); // rotated
+      // Token is now in TS.43 envelope: body.Token.token
+      expect(body1.Token).toBeDefined();
+      expect(body1.Token.token).toBeDefined();
+      expect(body1.Token.token).not.toBe(token.tokenValue); // rotated
+
+      const newToken = body1.Token.token;
 
       // Old token should be rejected
       const res2 = await app.inject({
@@ -253,12 +257,70 @@ describe('EAP-AKA Integration', () => {
         url: '/entitlement',
         payload: {
           ...BASE_BODY,
-          token: body1.token,
+          token: newToken,
         },
       });
 
       expect(res3.statusCode).toBe(200);
-      expect(res3.json().token).not.toBe(body1.token); // rotated again
+      expect(res3.json().Token.token).not.toBe(newToken); // rotated again
+    });
+  });
+
+  describe('TS.43 Response Format', () => {
+    it('returns TS.43 JSON envelope with Vers, Token, and app block', async () => {
+      const { generateToken, findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
+      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
+      const token = await generateToken(subscriberId!, 'auth', '127.0.0.1');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: token.tokenValue,
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+
+      // TS.43 envelope structure
+      expect(body.Vers).toBeDefined();
+      expect(body.Vers.version).toBe('1');
+      expect(body.Vers.validity).toBeDefined();
+      expect(body.Token).toBeDefined();
+      expect(body.Token.token).toBeDefined();
+
+      // Application block for ap2004 (VoWiFi)
+      expect(body.ap2004).toBeDefined();
+      expect(body.ap2004.EntitlementStatus).toBeDefined();
+    });
+
+    it('returns WAP-Provisioning XML when accept_content_type is xml', async () => {
+      const { generateToken, findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
+      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
+      const token = await generateToken(subscriberId!, 'auth', '127.0.0.1');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: token.tokenValue,
+          accept_content_type: 'xml',
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('application/xml');
+
+      const xml = res.body;
+      expect(xml).toContain('<?xml version="1.0"?>');
+      expect(xml).toContain('<wap-provisioningdoc version="1.1">');
+      expect(xml).toContain('<characteristic type="VERS">');
+      expect(xml).toContain('<characteristic type="TOKEN">');
+      expect(xml).toContain('<characteristic type="APPLICATION">');
+      expect(xml).toContain('name="AppID" value="ap2004"');
     });
   });
 
