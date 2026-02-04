@@ -148,6 +148,26 @@ export async function rotateToken(
 }
 
 /**
+ * Generate a temporary token for ODSA operations.
+ * Stores scope and operation targets in both Postgres and Redis.
+ */
+export async function generateTemporaryToken(
+  subscriberId: string,
+  clientIp: string,
+  scope: string,
+  operationTargets: string[],
+): Promise<TokenInfo> {
+  const tokenInfo = await generateToken(subscriberId, TOKEN_TYPES.TEMPORARY, clientIp);
+
+  // Store scope and targets in Redis alongside the token cache
+  const scopeData = JSON.stringify({ scope, operationTargets });
+  const ttl = config.tempTokenTtlSeconds;
+  await redis.set(`${TOKEN_CACHE_PREFIX}scope:${tokenInfo.tokenValue}`, scopeData, 'EX', ttl);
+
+  return tokenInfo;
+}
+
+/**
  * Find a subscriber by IMSI. Returns the subscriber ID or null.
  */
 export async function findSubscriberByImsi(imsi: string): Promise<string | null> {

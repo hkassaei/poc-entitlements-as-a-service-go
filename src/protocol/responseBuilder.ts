@@ -15,6 +15,9 @@ import { buildXmlResponse } from './xmlBuilder.js';
 import { buildVoWiFiConfig } from '../services/vowifi.js';
 import { buildVoLTEConfig } from '../services/volte.js';
 import { buildSmsOipConfig } from '../services/smsoip.js';
+import { buildCompanionConfig } from '../services/odsaCompanion.js';
+import { buildPrimaryConfig } from '../services/odsaPrimary.js';
+import type { OdsaContext } from '../services/odsaCommon.js';
 
 export interface FormattedResponse {
   body: object | string;
@@ -32,6 +35,7 @@ export async function buildEntitlementResponse(
   subscriberId: string,
   appId: string,
   acceptContentType?: string,
+  odsaContext?: OdsaContext,
 ): Promise<FormattedResponse> {
   // Look up entitlement for this subscriber + app
   const rows = await db
@@ -49,6 +53,7 @@ export async function buildEntitlementResponse(
     entitlement?.provStatus ?? 0,
     entitlement?.tcStatus ?? 0,
     entitlement?.configData,
+    odsaContext,
   );
 
   const response: ServiceEntitlementResponse = {
@@ -81,6 +86,7 @@ function buildAppConfig(
   provStatus: number,
   tcStatus: number,
   configData?: unknown,
+  odsaContext?: OdsaContext,
 ): ApplicationConfig {
   switch (appId) {
     case 'ap2004':
@@ -89,6 +95,10 @@ function buildAppConfig(
       return buildVoLTEConfig(status, provStatus, tcStatus, configData);
     case 'ap2005':
       return buildSmsOipConfig(status, provStatus, tcStatus, configData);
+    case 'ap2006':
+      return buildCompanionConfig(status, provStatus, tcStatus, configData, odsaContext);
+    case 'ap2009':
+      return buildPrimaryConfig(status, provStatus, tcStatus, configData, odsaContext);
     default:
       // Generic handler for unsupported app IDs
       return {

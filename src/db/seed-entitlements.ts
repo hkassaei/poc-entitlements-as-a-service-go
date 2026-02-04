@@ -65,6 +65,34 @@ const seedData: EntitlementSeed[] = [
     },
   },
 
+  // ODSA Companion: active + smdpAddress → ManageSubscription → DOWNLOAD_PROFILE
+  {
+    imsi: '001010000000001',
+    appId: 'ap2006',
+    status: 1,
+    provStatus: 3,
+    tcStatus: 1,
+    configData: {
+      subscriptionState: 'active',
+      smdpAddress: 'smdp.operator.com',
+      profileType: 'companion',
+    },
+  },
+  // ODSA Primary: eligible + serviceFlowUrl → CheckEligibility → eligible, AcquirePlan → CONTINUE_TO_WS
+  {
+    imsi: '001010000000001',
+    appId: 'ap2009',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      subscriptionState: 'eligible',
+      serviceFlowUrl: 'https://operator.com/plans/select',
+      planId: 'PLAN-UNLIMITED-001',
+      planName: 'Unlimited Plus',
+    },
+  },
+
   // --- Subscriber 2: "Bob" (001010000000002) ---
   // VoWiFi: disabled, needs T&C acceptance
   {
@@ -90,6 +118,31 @@ const seedData: EntitlementSeed[] = [
       ],
       volteEntitled: '1',
       vonrEntitled: '0',
+    },
+  },
+  // ODSA Companion: eligible + serviceFlowUrl → ManageSubscription → CONTINUE_TO_WS
+  {
+    imsi: '001010000000002',
+    appId: 'ap2006',
+    status: 1,
+    provStatus: 0,
+    tcStatus: 0,
+    configData: {
+      subscriptionState: 'eligible',
+      serviceFlowUrl: 'https://operator.com/companion/setup',
+    },
+  },
+  // ODSA Primary: active + smdpAddress → ManageSubscription → DOWNLOAD_PROFILE
+  {
+    imsi: '001010000000002',
+    appId: 'ap2009',
+    status: 1,
+    provStatus: 3,
+    tcStatus: 1,
+    configData: {
+      subscriptionState: 'active',
+      smdpAddress: 'smdp.operator.com',
+      profileType: 'default',
     },
   },
 ];

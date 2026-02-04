@@ -366,13 +366,123 @@ The `handleEapResponse()` function handles 10 distinct error cases before reachi
 
 ---
 
+## Phase 6: ODSA — Teaching the Server to Hand Out eSIMs
+
+### What Is ODSA?
+
+Everything we've built so far — VoWiFi, VoLTE, SMSoIP — is essentially a lookup: "Is this user allowed to use this service? Here's the config." ODSA (On-Device Service Activation) is fundamentally different. It's a **stateful workflow**: a device checks if it's eligible for an eSIM, subscribes to a plan, and then downloads an eSIM profile. Think of VoWiFi as checking your library card, while ODSA is the whole process of applying for a card, choosing a membership tier, and getting it printed.
+
+There are two flavors:
+- **ap2006 (Companion Device)**: Your smartwatch wants its own phone number linked to your main phone's plan
+- **ap2009 (Primary Device)**: Your new phone wants to download its own eSIM plan
+
+### The Design Decision: ODSA Fits Inside the Existing Pipeline
+
+The tempting approach was to build ODSA as a completely separate subsystem — new routes, new handlers, a whole parallel pipeline. Instead, we made a key architectural decision: **ODSA operations are just another dimension of the existing entitlement flow.**
+
+The request schema already had an `operation` field. The entitlement table already had a `configData` JSONB column. The `ApplicationConfig` type already had an `extraParams` bag. ODSA plugs into all three:
+
+1. The `operation` field acts as a **sub-router** within the service handler ("CheckEligibility", "ManageSubscription", "AcquirePlan", etc.)
+2. The `configData` JSONB stores **workflow state** (`subscriptionState: 'eligible'`, `smdpAddress: 'smdp.operator.com'`)
+3. `extraParams` carries **ODSA-specific response fields** (`SubscriptionResult`, `SMDP+Address`, `ProfileICCID`) through the JSON/XML builders unchanged
+
+This means zero changes to the JSON builder, zero changes to the XML builder, zero changes to the response types. The new code just plugs in.
+
+### The Mock SM-DP+: Pretending We Have an eSIM Platform
+
+In the real world, when a subscriber downloads an eSIM profile, the entitlement server talks to an **SM-DP+** (Subscription Manager - Data Preparation) server. This is a complex system that manages profile packages, signs them cryptographically, and delivers them to devices via QR codes or activation codes.
+
+We don't need any of that complexity for a POC. So we built `mockSmdp.ts` — a pure in-process module (not even a separate HTTP service) that returns three canned eSIM activation codes:
+
+```
+default  → "1$smdp.operator.com$POSTPAID-001"  (postpaid plan)
+prepaid  → "1$smdp.operator.com$PREPAID-001"   (prepaid plan)
+companion → "1$smdp.operator.com$COMPANION-001" (companion device)
+```
+
+The activation code format `1$address$matchingId` is the real TS.43 format. The `1` means "use SMDP+ protocol version 1." A real device would scan this code (or receive it over the air) and use it to contact the SM-DP+ and download its eSIM profile.
+
+### SubscriptionResult: The State Machine Output
+
+Every ODSA response includes a `SubscriptionResult` — a numeric code telling the device what to do next. These codes were originally defined as strings in our codebase, but TS.43 requires numeric values on the wire:
+
+| Code | Name | Meaning |
+|------|------|---------|
+| 1 | CONTINUE_TO_WS | "Go to this web URL to complete the process" |
+| 2 | DOWNLOAD_PROFILE | "Here's your eSIM activation code, download it" |
+| 3 | DONE | "Nothing more to do" |
+| 4 | DELAYED_DOWNLOAD | "Check back later" |
+| 6 | DELETE_PROFILE_IN_USE | "Delete your current profile first" |
+| 7 | REQUIRES_USER_INPUT | "We need more info from you" |
+
+Notice there's no 5. The TS.43 spec skipped it. Don't ask why. Telecom standards are like that.
+
+### The AcquireTemporaryToken Problem: When a Side Effect Crosses Layers
+
+Most ODSA operations are pure: take config data in, produce a response config out. But `AcquireTemporaryToken` is different — it has a **side effect**: it needs to generate a new temporary token and inject it into the response.
+
+The service handler (in `odsaCompanion.ts` / `odsaPrimary.ts`) is a pure function that transforms config data into an `ApplicationConfig`. It doesn't have access to the database, Redis, or the request context. Token generation requires all three.
+
+The solution: **the service handler returns `DONE`, and the route layer handles the side effect.** After building the response, the route handler checks if the operation was `AcquireTemporaryToken`. If so, it generates the token and injects `TemporaryToken` and `TemporaryTokenValidity` into the response's app block.
+
+This is a classic example of the "pure core, imperative shell" pattern. The service handlers stay testable without mocking databases. The route handler handles the messy real-world stuff.
+
+### The File Map
+
+```
+src/services/
+  mockSmdp.ts          — 3 canned eSIM profiles (not a network service, just a lookup table)
+  odsaCommon.ts        — Shared types (OdsaConfigData, OdsaContext) + buildOdsaBaseConfig helper
+  odsaCompanion.ts     — ap2006 handler: 6 operations (CheckEligibility, ManageSubscription, etc.)
+  odsaPrimary.ts       — ap2009 handler: same 6 + AcquirePlan
+
+src/protocol/
+  statusCodes.ts       — SubscriptionResult changed from strings to TS.43 numeric codes
+  requestSchemas.ts    — Added AcquirePlan to the OdsaOperationSchema union
+  responseBuilder.ts   — Added ap2006/ap2009 routing + optional OdsaContext parameter
+
+src/auth/
+  tokenService.ts      — Added generateTemporaryToken() for ODSA flows
+
+src/server/routes/
+  entitlement.ts       — Passes OdsaContext to response builder + AcquireTemporaryToken side effect
+
+src/db/
+  seed-entitlements.ts — 4 new ODSA seed records (Alice & Bob × companion & primary)
+```
+
+### Lessons From Phase 6
+
+#### 1. Backward Compatibility Through Optional Parameters
+
+The `buildEntitlementResponse()` function gained an `odsaContext` parameter, but it's optional. The three existing service handlers (VoWiFi, VoLTE, SMSoIP) don't know or care about it. None of their call sites changed. The new `buildAppConfig()` switch cases pass `odsaContext` to the ODSA handlers; the old ones ignore it.
+
+**Takeaway:** When extending a pipeline, make new parameters optional with sensible defaults. Existing callers should work without changes.
+
+#### 2. The extraParams Bag Is a Powerful Extension Point
+
+We defined `extraParams: Record<string, string>` back in Phase 5 for VoLTE's `VoLTE_Entitled` and `VoNR_Entitled`. Now ODSA uses the same mechanism for `SubscriptionResult`, `SMDP+Address`, `SMDP+ActivationCode`, `ProfileICCID`, `ServiceFlow_URL`, `PlanId`, `PlanName`, `TemporaryToken`, and `TemporaryTokenValidity`. The JSON and XML builders iterate over `extraParams` without knowing what the keys mean.
+
+**Takeaway:** A generic key-value bag, combined with typed handler functions that populate it, is more maintainable than adding typed fields for every possible response parameter. The bag is "untyped at the wire level, typed at the construction level."
+
+#### 3. Sub-Routing via Operation Field
+
+Instead of creating new HTTP endpoints (`/entitlement/companion/check-eligibility`), we used the existing `operation` field in the request body as a sub-router. This matches how TS.43 works: the device sends a single POST with different `operation` values.
+
+**Takeaway:** When a protocol defines its own routing mechanism, use it. Don't fight the spec by mapping protocol operations to HTTP paths. Your API surface should mirror the protocol surface.
+
+#### 4. Pure Handlers + Imperative Side Effects
+
+The companion and primary handlers are pure functions: `(status, provStatus, tcStatus, configData, odsaContext) → ApplicationConfig`. They're trivially testable — no mocking needed. The 17 unit tests run in 9ms total. The side effect (token generation) lives in the route handler where it has access to the request context and database.
+
+**Takeaway:** Keep business logic pure. Push I/O to the edges. Your unit tests will thank you.
+
 ## What's Coming Next
 
-- **Phase 4**: Full service handlers for all 12 AppIDs
-- **Phase 5**: ODSA eSIM operations
-- **Phase 6**: Deployment to Google Cloud Run
+- **Deployment**: Google Cloud Run with managed TLS, Cloud Armor DDoS protection, and VPC Service Controls
+- **More ODSA operations**: Server-initiated ODSA (ap2011), data plan info (ap2010)
 
-Now if you `curl` the entitlement endpoint with a valid IMSI, you get a real cryptographic challenge back!
+Now if you `curl` the entitlement endpoint with an ODSA operation, you get real eSIM activation codes back!
 
 ---
 

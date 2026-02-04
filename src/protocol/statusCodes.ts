@@ -14,14 +14,14 @@ export const ServiceStatus = {
   NOT_SUBSCRIBED: 3,
 } as const;
 
-/** ODSA subscription result */
+/** ODSA subscription result (TS.43 numeric codes) */
 export const SubscriptionResult = {
-  CONTINUE_TO_WS: 'CONTINUE_TO_WS',
-  DOWNLOAD_PROFILE: 'DOWNLOAD_PROFILE',
-  DONE: 'DONE',
-  DELAYED_DOWNLOAD: 'DELAYED_DOWNLOAD',
-  DELETE_PROFILE_IN_USE: 'DELETE_PROFILE_IN_USE',
-  REQUIRES_USER_INPUT: 'REQUIRES_USER_INPUT',
+  CONTINUE_TO_WS: 1,
+  DOWNLOAD_PROFILE: 2,
+  DONE: 3,
+  DELAYED_DOWNLOAD: 4,
+  DELETE_PROFILE_IN_USE: 6,
+  REQUIRES_USER_INPUT: 7,
 } as const;
 
 /** Terms & Conditions status */

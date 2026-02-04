@@ -22,6 +22,7 @@ const OdsaOperationSchema = Type.Union([
   Type.Literal('AcquireConfiguration'),
   Type.Literal('AcquireTemporaryToken'),
   Type.Literal('GetOperatorToken'),
+  Type.Literal('AcquirePlan'),
 ]);
 
 export const EntitlementRequestBody = Type.Object({

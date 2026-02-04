@@ -4,7 +4,7 @@ import { HTTP_STATUS } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
 import { handleInitialRequest, handleEapResponse } from '../../auth/eapAka.js';
 import { HssSubscriberNotFoundError } from '../../auth/eapAkaVectors.js';
-import { validateToken, rotateToken } from '../../auth/tokenService.js';
+import { validateToken, rotateToken, generateTemporaryToken } from '../../auth/tokenService.js';
 import { cacheResponse, getCachedResponse } from '../../auth/eapIdempotency.js';
 import { buildEntitlementResponse } from '../../protocol/responseBuilder.js';
 
@@ -32,6 +32,8 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         token?: string;
         eap_relay?: string;
         accept_content_type?: string;
+        operation?: string;
+        operation_type?: number;
       };
 
       const clientIp = request.ip;
@@ -55,12 +57,42 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           clientIp,
         );
 
+        const odsaContext = body.operation
+          ? { operation: body.operation, operationType: body.operation_type }
+          : undefined;
+
         const formatted = await buildEntitlementResponse(
           newToken.tokenValue,
           tokenInfo.subscriberId,
           body.app,
           body.accept_content_type,
+          odsaContext,
         );
+
+        // Handle AcquireTemporaryToken side effect
+        if (
+          body.operation === 'AcquireTemporaryToken' &&
+          (body.app === 'ap2006' || body.app === 'ap2009')
+        ) {
+          const tempToken = await generateTemporaryToken(
+            tokenInfo.subscriberId,
+            clientIp,
+            body.app,
+            [body.operation],
+          );
+          // Inject temporary token into response
+          if (typeof formatted.body === 'object' && formatted.body !== null) {
+            const appBlock = (formatted.body as Record<string, unknown>)[body.app] as
+              | Record<string, unknown>
+              | undefined;
+            if (appBlock) {
+              appBlock.TemporaryToken = tempToken.tokenValue;
+              appBlock.TemporaryTokenValidity = String(
+                Math.floor((tempToken.expiresAt.getTime() - Date.now()) / 1000),
+              );
+            }
+          }
+        }
 
         return reply
           .code(HTTP_STATUS.OK)
@@ -89,11 +121,16 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         const result = await handleEapResponse(body.eap_relay, sessionId, clientIp);
 
         if (result.statusCode === 200 && result.token) {
+          const odsaCtx = body.operation
+            ? { operation: body.operation, operationType: body.operation_type }
+            : undefined;
+
           const formatted = await buildEntitlementResponse(
             result.token,
             result.subscriberId!,
             body.app,
             body.accept_content_type,
+            odsaCtx,
           );
 
           // For idempotency cache, always store the JSON representation
@@ -176,6 +213,8 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         entitlement_version: string;
         token?: string;
         accept_content_type?: string;
+        operation?: string;
+        operation_type?: string;
       };
 
       if (!query.token) {
@@ -195,11 +234,16 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      const odsaCtxGet = query.operation
+        ? { operation: query.operation, operationType: query.operation_type ? parseInt(query.operation_type, 10) : undefined }
+        : undefined;
+
       const formatted = await buildEntitlementResponse(
         query.token,
         tokenInfo.subscriberId,
         query.app,
         query.accept_content_type,
+        odsaCtxGet,
       );
 
       return reply
