@@ -1,6 +1,6 @@
 # Mock HSS — internal only, must be deployed before ECS
 resource "google_cloud_run_v2_service" "mock_hss" {
-  name     = "mock-hss"
+  name     = "${var.environment}-mock-hss"
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
@@ -88,7 +88,7 @@ resource "google_cloud_run_v2_service" "mock_hss" {
 
 # Entitlement Server (ECS) — public
 resource "google_cloud_run_v2_service" "ecs" {
-  name     = "entitlement-server"
+  name     = "${var.environment}-entitlement-server"
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"

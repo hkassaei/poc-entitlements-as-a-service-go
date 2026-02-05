@@ -3,6 +3,11 @@ variable "project_id" {
   type        = string
 }
 
+variable "state_bucket_name" {
+  description = "The name of the GCS bucket for Terraform state"
+  type        = string
+}
+
 variable "environment" {
   description = "Environment name (e.g. dev, staging, prod) — used to namespace shared resources like secrets"
   type        = string

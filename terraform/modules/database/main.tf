@@ -11,7 +11,7 @@ resource "random_id" "db_suffix" {
 }
 
 resource "google_sql_database_instance" "postgres" {
-  name             = "entitlements-db-${random_id.db_suffix.hex}"
+  name             = "${var.environment}-entitlements-db-${random_id.db_suffix.hex}"
   project          = var.project_id
   region           = var.region
   database_version = "POSTGRES_16"
@@ -19,7 +19,7 @@ resource "google_sql_database_instance" "postgres" {
 
   settings {
     tier              = var.tier
-    availability_type = var.ha_enabled ? "REGIONAL" : "ZONAL"
+    availability_type = (var.environment == "prod" || var.environment == "staging") ? "REGIONAL" : "ZONAL"
     disk_size         = 10
     disk_autoresize   = true
 
@@ -27,6 +27,7 @@ resource "google_sql_database_instance" "postgres" {
       ipv4_enabled                                  = false
       private_network                               = var.network_id
       enable_private_path_for_google_cloud_services = true
+      require_ssl                                   = true
     }
 
     backup_configuration {
@@ -41,7 +42,7 @@ resource "google_sql_database_instance" "postgres" {
     }
   }
 
-  deletion_protection = false
+  deletion_protection = true
 }
 
 resource "google_sql_database" "entitlements" {

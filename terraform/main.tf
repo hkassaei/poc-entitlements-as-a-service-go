@@ -1,6 +1,11 @@
 terraform {
   required_version = ">= 1.5"
 
+  backend "gcs" {
+    bucket = "REPLACE_WITH_YOUR_TERRAFORM_STATE_BUCKET"
+    prefix = "terraform/state"
+  }
+
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -42,9 +47,10 @@ resource "google_project_service" "apis" {
 }
 
 module "networking" {
-  source     = "./modules/networking"
-  project_id = var.project_id
-  region     = var.region
+  source      = "./modules/networking"
+  project_id  = var.project_id
+  region      = var.region
+  environment = var.environment
 
   depends_on = [google_project_service.apis]
 }
@@ -60,6 +66,7 @@ module "database" {
   source                = "./modules/database"
   project_id            = var.project_id
   region                = var.region
+  environment           = var.environment
   network_id            = module.networking.network_id
   private_ip_range_name = module.networking.private_ip_range_name
   tier                  = var.db_tier
@@ -69,10 +76,11 @@ module "database" {
 }
 
 module "redis" {
-  source     = "./modules/redis"
-  project_id = var.project_id
-  region     = var.region
-  network_id = module.networking.network_id
+  source      = "./modules/redis"
+  project_id  = var.project_id
+  region      = var.region
+  environment = var.environment
+  network_id  = module.networking.network_id
 
   depends_on = [google_project_service.apis, module.networking]
 }
@@ -112,6 +120,7 @@ module "cloud_run" {
   source                         = "./modules/cloud-run"
   project_id                     = var.project_id
   region                         = var.region
+  environment                    = var.environment
   vpc_network                    = module.networking.network_name
   vpc_subnetwork                 = module.networking.subnet_name
   cloudsql_connection_name       = module.database.connection_name

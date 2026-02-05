@@ -1,5 +1,5 @@
 resource "google_redis_instance" "cache" {
-  name               = "entitlements-redis"
+  name               = "${var.environment}-entitlements-redis"
   project            = var.project_id
   region             = var.region
   tier               = "BASIC"

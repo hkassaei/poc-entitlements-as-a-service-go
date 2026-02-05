@@ -6,6 +6,11 @@ variable "region" {
   type = string
 }
 
+variable "environment" {
+  description = "Environment name (e.g. dev, staging, prod)"
+  type        = string
+}
+
 variable "vpc_network" {
   description = "VPC network name for Direct VPC Egress"
   type        = string

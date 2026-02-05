@@ -1,11 +1,11 @@
 resource "google_compute_network" "vpc" {
-  name                    = "entitlements-vpc"
+  name                    = "${var.environment}-entitlements-vpc"
   project                 = var.project_id
   auto_create_subnetworks = false
 }
 
 resource "google_compute_subnetwork" "subnet" {
-  name          = "entitlements-subnet"
+  name          = "${var.environment}-entitlements-subnet"
   project       = var.project_id
   region        = var.region
   network       = google_compute_network.vpc.id
@@ -19,7 +19,7 @@ resource "google_compute_subnetwork" "subnet" {
 # subnet (10.0.0.0/20). Without an explicit address, Google's
 # auto-allocator often picks 10.0.0.0/16 which overlaps the subnet.
 resource "google_compute_global_address" "private_ip_range" {
-  name          = "entitlements-private-ip"
+  name          = "${var.environment}-entitlements-private-ip"
   project       = var.project_id
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
@@ -35,7 +35,7 @@ resource "google_service_networking_connection" "private_vpc_connection" {
 }
 # Firewall: allow internal traffic
 resource "google_compute_firewall" "allow_internal" {
-  name    = "entitlements-allow-internal"
+  name    = "${var.environment}-entitlements-allow-internal"
   project = var.project_id
   network = google_compute_network.vpc.name
 
