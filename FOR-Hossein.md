@@ -1376,10 +1376,86 @@ The module is wired in `terraform/main.tf` and depends on both `cloud_run` (for 
 
 ---
 
+## Phase 9: EAP-AKA Fast Re-authentication (RFC 4187 §5.1)
+
+### The Problem: Why Opaque Tokens Weren't Good Enough
+
+Our original "fast auth" was simple: after a full EAP-AKA handshake, the server issued an opaque database token. When the device came back, it presented the token, the server looked it up in Postgres, rotated it, and served entitlements. This worked, but it had three problems:
+
+1. **It wasn't spec-compliant.** The GSMA TS.43 standard says fast re-authentication should use EAP-AKA's built-in re-authentication mechanism (RFC 4187 Section 5.1), not a homebrew token scheme.
+
+2. **It hit the database on every request.** Token validation + rotation = 2 Postgres queries per fast-auth. That's fine at small scale but becomes a bottleneck when millions of devices check entitlements periodically.
+
+3. **No cryptographic proof of identity.** The opaque token was just "I was authenticated before, trust me." RFC 4187 re-auth gives you a fresh cryptographic handshake — the device proves it still holds the original session keys, and both sides derive fresh session keys.
+
+### The Solution: How Re-auth Actually Works
+
+Think of it like a secret handshake between old friends. When two people first meet (full EAP-AKA), they go through formal introductions — IDs checked, credentials verified, the whole ceremony. But they also agree on a secret gesture. Next time they meet, they can skip the formalities and just do the secret gesture to prove they know each other.
+
+Here's the concrete flow:
+
+```
+Full Auth (first time):
+  Phone → "I'm IMSI 001010000000001"
+  Server → 401 + AKA-Challenge (RAND, AUTN, MAC)
+  Phone → AKA-Response (RES, MAC)
+  Server → 200 + re-auth identity + entitlements
+                ↑ This is the "secret gesture" — a random string
+                  backed by MK, K_aut, K_encr stored in Redis
+
+Fast Re-auth (subsequent times):
+  Phone → "Here's my re-auth identity"
+  Server → 401 + AKA-Reauthentication challenge
+           (encrypted: counter, nonce, next re-auth identity)
+  Phone → AKA-Reauthentication response
+           (encrypted: counter echo + MAC)
+  Server → 200 + new re-auth identity + entitlements
+                ↑ Old identity destroyed, new one issued
+```
+
+The beauty is that the re-auth challenge is a *real* cryptographic exchange — the server encrypts a counter and nonce using AES-128-CBC with the original K_encr, and the device proves it can decrypt it and echo the counter back. If anything is wrong (tampered MAC, wrong counter, expired keys), the server falls back to full authentication. No HSS call needed for re-auth.
+
+### The Architecture: Four New Files, Four Modified Files
+
+**The new modules form a clean pipeline:**
+
+1. `eapEncryption.ts` — The crypto layer. AES-128-CBC encrypt/decrypt for the "inner attributes" that travel inside AT_ENCR_DATA. Uses AT_PADDING to align to 16-byte blocks (no PKCS7 auto-padding — we handle it ourselves per the RFC).
+
+2. `reauthStore.ts` — Long-lived Redis storage. When a device completes auth, we store {MK, K_aut, K_encr, counter, identity} in a Redis hash with a 48-hour TTL. This is the "I know this device" state. Redis-only, no Postgres — if Redis restarts, devices just do full auth again. No business data is lost.
+
+3. `reauthSession.ts` — Short-lived (90s) Redis storage for correlating challenge/response. Same pattern as the existing eapSession.ts but for re-auth exchanges.
+
+4. `eapReauth.ts` — The orchestrator with two functions: `handleReauthRequest` (build challenge) and `handleReauthResponse` (verify response, rotate identity, derive new keys).
+
+**The key insight about the route handler changes:**
+
+The POST /entitlement handler went from 3 paths to 4:
+
+```
+Before:  token → validate+rotate     | eap_relay → full auth RT2  | IMSI → full auth RT1
+After:   eap_relay → reauth RT2 or full auth RT2
+         token → reauth RT1 or ODSA temporary token
+         IMSI → full auth RT1
+```
+
+The order matters: `eap_relay` is checked first because it could be either a re-auth response or a full auth response. We check the re-auth session store first, then fall through to full auth.
+
+### Lessons and Gotchas
+
+**18. AT_ENCR_DATA padding is NOT PKCS7.** RFC 4187 uses AT_PADDING (a TLV attribute that's literally zero-bytes of the right length) instead of PKCS7 block padding. This means you must call `cipher.setAutoPadding(false)` and manually append AT_PADDING to make the plaintext a multiple of 16 bytes before encryption. If you forget, Node's crypto module will add PKCS7 padding, and the device won't be able to decrypt it.
+
+**19. Counter-too-small is a full auth fallback, not a failure.** When the device's counter is behind the server's (maybe the server state got ahead due to a race), the device sends AT_COUNTER_TOO_SMALL. The spec says the server should NOT just fail — it should fall back to a full EAP-AKA authentication. Our `handleReauthResponse` detects this and calls `handleInitialRequest` to start a fresh full auth, returning the new session ID so the client can continue.
+
+**20. MAC verification must happen BEFORE decryption.** The AT_MAC in a re-auth response covers the *ciphertext*, not the plaintext. If you decrypt first and then try to verify MAC, you'll be checking the wrong data. The sequence is: verify MAC on the raw packet → decrypt AT_ENCR_DATA → check inner attributes.
+
+**21. Re-auth identities look like tokens but aren't.** Both are opaque strings passed in the `token` field of requests. But they live in completely different stores (Redis re-auth hash vs Postgres tokens table). The route handler tries re-auth state first, then falls back to the token service. This means old ODSA temporary tokens (which are Postgres-backed) still work — they just take the second code path.
+
+**22. K_aut and K_encr persist across re-auths.** Only MSK and EMSK get re-derived on each re-auth (from the original MK + counter + nonce). The authentication and encryption keys are "session-level" — they last until the re-auth state expires or counter exhausts. This is per RFC 4187 Section 7.
+
 ## What's Coming Next
 
-- **Phase 9: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
-- **Phase 10: Testing & Hardening**: Load testing, error handling audit, logging completeness
+- **Phase 10: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
+- **Phase 11: Testing & Hardening**: Load testing, error handling audit, logging completeness
 
 ---
 

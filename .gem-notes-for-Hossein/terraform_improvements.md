@@ -1,10 +1,12 @@
+ # Identified Improvements for Infrastructure
+ 
  Based on a detailed review of the Terraform code in terraform/ and its modules, I have identified several findings ranging from critical infrastructure gaps to code quality improvements.
 
 
   Overall, the infrastructure code is high quality and demonstrates good security practices (Private IPs, Least Privilege IAM, Secret Manager integration, VPC isolation). However, there
   are a few Critical and High priority issues that must be addressed before this can be considered "Production Ready".
 
-  # Identified improvements to be made with priority
+  ## Identified improvements to be made with priority
 
   1. Critical Findings (Must Fix)
 
@@ -125,3 +127,49 @@
 
 
   The environment variable is now passed from the root main.tf to all relevant modules.
+
+
+# Identified Improvements for application (ECS)
+
+✦ I have identified several logical gaps and architectural risks in the ECS application that could impact its production readiness and protocol compliance.
+
+
+  1. Protocol Compliance (GSMA TS.43 / EAP-AKA)
+
+
+   * Missing Re-authentication Flow: The current implementation always performs a full EAP-AKA handshake (calling the HSS for new vectors). TS.43 strongly recommends Fast Re-authentication
+     using keys derived during the full auth (MSK/EMSK) to reduce HSS load and latency.
+   * Lack of Sequence Number (SQN) Synchronization: In eapAka.ts, the SYNC_FAILURE case (where the SIM's SQN is out of sync with the HSS) is currently a stub that simply fails the session.
+     In production, this must forward the AT_AUTS attribute to the HSS to resynchronize the counter and generate fresh vectors.
+   * Incomplete Attribute Handling: The eapCodec.ts is missing support for AT_CHECKCODE, which is required in some EAP-AKA variants to prevent bidding-down attacks on protocol version
+     negotiation.
+
+  2. Token & Session Management
+
+
+   * Token Rotation Race Condition: In entitlementRoutes.ts, tokens are rotated (old revoked, new issued) on every POST. If a mobile device retries a request due to a transient network
+     failure after the server has processed the rotation, the retry will carry the "old" (now revoked) token and fail with a 401.
+       * Recommendation: Implement a short "grace period" (e.g., 30-60 seconds) where the previous token remains valid for retries.
+   * Static Identifier Counter: The identifierCounter in eapAka.ts is local to the Node.js process memory. In a multi-instance Cloud Run environment, different instances will reuse the
+     same EAP identifiers, which can cause collision issues on some client implementations.
+
+  3. Business Logic (ODSA & Services)
+
+
+   * Stateful ODSA Transitions: The ODSA handlers (odsaCompanion.ts) assume a fairly linear path. However, TS.43 requires complex handling for SubscriptionResult codes like
+     DELAYED_DOWNLOAD (where the device must poll) and DELETE_PROFILE_IN_USE (requiring a prerequisite action). The current mocks return DONE too aggressively.
+   * Missing T&C Flow logic: While vowifi.ts handles the REQUIRES_ACCEPTANCE status, there is no logic to transition a subscriber from DISABLED to ENABLED once the T&C URL has been visited
+     (as the BSS callback is not yet implemented).
+
+
+  4. Security Risks
+
+
+   * Audit Log Redaction: While the code intends to avoid logging sensitive data, there is no centralized filter in the audit_log database logic to ensure that eap_relay or partial tokens
+     are consistently redacted before being stored in the request_summary JSONB field.
+   * Timing Safety: Although crypto.timingSafeEqual is used for AT_RES verification, the session lookup itself happens before MAC verification. A high-resolution timing attack could
+     potentially be used to probe for valid session IDs in Redis.
+
+
+  I recommend prioritizing the Token Rotation Grace Period and the SQN Sync Failure handling to ensure a robust user experience on real-world mobile networks.
+

@@ -8,9 +8,29 @@
  *
  * They exercise the full ODSA (On-Device Service Activation) flows
  * for companion (ap2006) and primary (ap2009) devices.
+ *
+ * ODSA operations use temporary tokens (DB-backed) which bypass the
+ * re-auth challenge flow. In production, a device first does a re-auth
+ * exchange with AcquireTemporaryToken, then uses that temporary token
+ * for subsequent ODSA operations.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import crypto from 'node:crypto';
+import { generateReauthId, storeReauthState } from '../../src/auth/reauthStore.js';
+import { generateToken, findSubscriberByImsi } from '../../src/auth/tokenService.js';
+import {
+  decodeEapPacket,
+  encodeEapPacket,
+  EAP_CODE,
+  EAP_TYPE_AKA,
+  AKA_SUBTYPE,
+  AT,
+  type EapPacket,
+} from '../../src/auth/eapCodec.js';
+import { encryptAttributes, decryptAttributes } from '../../src/auth/eapEncryption.js';
+import { computeMac } from '../../src/auth/keyDerivation.js';
+import { TOKEN_TYPES } from '../../src/config/constants.js';
 
 const TEST_IMSI_ALICE = '001010000000001';
 const TEST_IMSI_BOB = '001010000000002';
@@ -22,12 +42,118 @@ const BASE_BODY = {
   entitlement_version: '2',
 };
 
+/**
+ * Get a temporary token for a subscriber (simulates the result of
+ * AcquireTemporaryToken). Uses generateToken directly since ODSA
+ * operations work with DB-backed temporary tokens.
+ */
 async function getTokenForSubscriber(imsi: string): Promise<string> {
-  const { generateToken, findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
   const subscriberId = await findSubscriberByImsi(imsi);
   if (!subscriberId) throw new Error(`Subscriber not found: ${imsi}`);
-  const token = await generateToken(subscriberId, 'auth', '127.0.0.1');
+  const token = await generateToken(subscriberId, TOKEN_TYPES.TEMPORARY, '127.0.0.1');
   return token.tokenValue;
+}
+
+/**
+ * Helper to get a re-auth identity and keys, perform the re-auth exchange,
+ * and return the new re-auth identity (for tests that need the full flow).
+ */
+async function performReauthExchange(
+  imsi: string,
+  appId: string,
+  operation?: string,
+): Promise<{ token: string; responseBody: Record<string, unknown> }> {
+  const subscriberId = await findSubscriberByImsi(imsi);
+  if (!subscriberId) throw new Error(`Subscriber not found: ${imsi}`);
+
+  const mk = crypto.randomBytes(20);
+  const kAut = crypto.randomBytes(16);
+  const kEncr = crypto.randomBytes(16);
+  const reauthId = generateReauthId();
+  await storeReauthState({
+    subscriberId,
+    imsi,
+    mk: mk.toString('base64'),
+    kAut: kAut.toString('base64'),
+    kEncr: kEncr.toString('base64'),
+    counter: 1,
+    identity: reauthId,
+  });
+
+  // RT1: POST with re-auth identity → 401 + challenge
+  const rt1 = await app.inject({
+    method: 'POST',
+    url: '/entitlement',
+    payload: {
+      ...BASE_BODY,
+      app: appId,
+      token: reauthId,
+      ...(operation ? { operation } : {}),
+    },
+  });
+
+  if (rt1.statusCode !== 401) throw new Error(`Expected 401, got ${rt1.statusCode}`);
+  const sessionId = rt1.headers['x-eap-session-id'] as string;
+
+  // Build client response
+  const eapResponse = buildReauthResponse(rt1.json().eap_relay, kAut, kEncr);
+
+  // RT2: Send response → 200
+  const rt2 = await app.inject({
+    method: 'POST',
+    url: '/entitlement',
+    headers: { 'x-eap-session-id': sessionId },
+    payload: {
+      ...BASE_BODY,
+      app: appId,
+      eap_relay: eapResponse,
+      ...(operation ? { operation } : {}),
+    },
+  });
+
+  if (rt2.statusCode !== 200) throw new Error(`Expected 200, got ${rt2.statusCode}`);
+  return { token: rt2.json().Token.token, responseBody: rt2.json() };
+}
+
+function buildReauthResponse(
+  challengeBase64: string,
+  kAut: Buffer,
+  kEncr: Buffer,
+): string {
+  const challengeBytes = Buffer.from(challengeBase64, 'base64');
+  const challenge = decodeEapPacket(challengeBytes);
+  const atIv = challenge.attributes!.find((a) => a.type === AT.AT_IV)!;
+  const atEncrData = challenge.attributes!.find((a) => a.type === AT.AT_ENCR_DATA)!;
+  const innerAttrs = decryptAttributes(kEncr, atIv.value, atEncrData.value);
+  const atCounter = innerAttrs.find((a) => a.type === AT.AT_COUNTER)!;
+
+  const clientIv = crypto.randomBytes(16);
+  const clientCiphertext = encryptAttributes(kEncr, clientIv, [
+    { type: AT.AT_COUNTER, value: atCounter.value },
+  ]);
+
+  const responsePacket: EapPacket = {
+    code: EAP_CODE.RESPONSE,
+    identifier: challenge.identifier,
+    type: EAP_TYPE_AKA,
+    subtype: AKA_SUBTYPE.REAUTHENTICATION,
+    attributes: [
+      { type: AT.AT_IV, value: clientIv },
+      { type: AT.AT_ENCR_DATA, value: clientCiphertext },
+      { type: AT.AT_MAC, value: Buffer.alloc(16) },
+    ],
+  };
+
+  const responseBytes = encodeEapPacket(responsePacket);
+  let macOffset = 8;
+  while (macOffset + 2 <= responseBytes.length) {
+    if (responseBytes.readUInt8(macOffset) === AT.AT_MAC) break;
+    macOffset += responseBytes.readUInt8(macOffset + 1) * 4;
+  }
+  const mac = computeMac(kAut, responseBytes);
+  mac.copy(responseBytes, macOffset + 4);
+
+  return responseBytes.toString('base64');
 }
 
 beforeAll(async () => {
@@ -108,25 +234,17 @@ describe('ODSA Integration', () => {
       expect(body.ap2006.ServiceFlow_URL).toBeDefined();
     });
 
-    it('AcquireTemporaryToken → 200 with TemporaryToken in response', async () => {
-      const token = await getTokenForSubscriber(TEST_IMSI_ALICE);
+    it('AcquireTemporaryToken via re-auth → 200 with TemporaryToken in response', async () => {
+      const { responseBody } = await performReauthExchange(
+        TEST_IMSI_ALICE,
+        'ap2006',
+        'AcquireTemporaryToken',
+      );
 
-      const res = await app.inject({
-        method: 'POST',
-        url: '/entitlement',
-        payload: {
-          ...BASE_BODY,
-          app: 'ap2006',
-          token,
-          operation: 'AcquireTemporaryToken',
-        },
-      });
-
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.ap2006).toBeDefined();
-      expect(body.ap2006.TemporaryToken).toBeDefined();
-      expect(body.ap2006.TemporaryTokenValidity).toBeDefined();
+      expect(responseBody.ap2006).toBeDefined();
+      const ap2006 = responseBody.ap2006 as Record<string, unknown>;
+      expect(ap2006.TemporaryToken).toBeDefined();
+      expect(ap2006.TemporaryTokenValidity).toBeDefined();
     });
   });
 

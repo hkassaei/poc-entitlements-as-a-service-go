@@ -150,6 +150,178 @@ describe('EAP Codec', () => {
     });
   });
 
+  describe('AKA-Reauthentication (AT_IV + AT_ENCR_DATA + AT_MAC)', () => {
+    const iv = Buffer.alloc(16, 0x11);
+    const ciphertext = Buffer.alloc(32, 0x22); // 2 blocks of AES
+    const mac = Buffer.alloc(16, 0x33);
+
+    const reauthPacket: EapPacket = {
+      code: EAP_CODE.REQUEST,
+      identifier: 20,
+      type: EAP_TYPE_AKA,
+      subtype: AKA_SUBTYPE.REAUTHENTICATION,
+      attributes: [
+        { type: AT.AT_IV, value: iv },
+        { type: AT.AT_ENCR_DATA, value: ciphertext },
+        { type: AT.AT_MAC, value: mac },
+      ],
+    };
+
+    it('round-trips AT_IV', () => {
+      const buf = encodeEapPacket(reauthPacket);
+      const decoded = decodeEapPacket(buf);
+      const decodedIv = decoded.attributes!.find((a) => a.type === AT.AT_IV)!;
+      expect(decodedIv.value).toEqual(iv);
+      expect(decodedIv.value.length).toBe(16);
+    });
+
+    it('round-trips AT_ENCR_DATA', () => {
+      const buf = encodeEapPacket(reauthPacket);
+      const decoded = decodeEapPacket(buf);
+      const decodedEncr = decoded.attributes!.find((a) => a.type === AT.AT_ENCR_DATA)!;
+      expect(decodedEncr.value).toEqual(ciphertext);
+    });
+
+    it('round-trips AT_MAC in reauthentication packet', () => {
+      const buf = encodeEapPacket(reauthPacket);
+      const decoded = decodeEapPacket(buf);
+      const decodedMac = decoded.attributes!.find((a) => a.type === AT.AT_MAC)!;
+      expect(decodedMac.value).toEqual(mac);
+    });
+
+    it('uses REAUTHENTICATION subtype (13)', () => {
+      const buf = encodeEapPacket(reauthPacket);
+      const decoded = decodeEapPacket(buf);
+      expect(decoded.subtype).toBe(AKA_SUBTYPE.REAUTHENTICATION);
+      expect(decoded.subtype).toBe(13);
+    });
+  });
+
+  describe('AT_COUNTER', () => {
+    it('round-trips counter value', () => {
+      const counterBuf = Buffer.alloc(2);
+      counterBuf.writeUInt16BE(1234, 0);
+
+      const packet: EapPacket = {
+        code: EAP_CODE.RESPONSE,
+        identifier: 5,
+        type: EAP_TYPE_AKA,
+        subtype: AKA_SUBTYPE.REAUTHENTICATION,
+        attributes: [
+          { type: AT.AT_COUNTER, value: counterBuf },
+        ],
+      };
+
+      const buf = encodeEapPacket(packet);
+      const decoded = decodeEapPacket(buf);
+      const decodedCounter = decoded.attributes!.find((a) => a.type === AT.AT_COUNTER)!;
+      expect(decodedCounter.value.readUInt16BE(0)).toBe(1234);
+    });
+
+    it('encodes AT_COUNTER to 4 bytes total (length=1)', () => {
+      const counterBuf = Buffer.alloc(2);
+      counterBuf.writeUInt16BE(0, 0);
+
+      const packet: EapPacket = {
+        code: EAP_CODE.RESPONSE,
+        identifier: 1,
+        type: EAP_TYPE_AKA,
+        subtype: AKA_SUBTYPE.REAUTHENTICATION,
+        attributes: [
+          { type: AT.AT_COUNTER, value: counterBuf },
+        ],
+      };
+
+      const buf = encodeEapPacket(packet);
+      // Header(8) + AT_COUNTER(4) = 12
+      expect(buf.length).toBe(12);
+    });
+  });
+
+  describe('AT_COUNTER_TOO_SMALL', () => {
+    it('round-trips (empty value)', () => {
+      const packet: EapPacket = {
+        code: EAP_CODE.RESPONSE,
+        identifier: 5,
+        type: EAP_TYPE_AKA,
+        subtype: AKA_SUBTYPE.REAUTHENTICATION,
+        attributes: [
+          { type: AT.AT_COUNTER_TOO_SMALL, value: Buffer.alloc(0) },
+        ],
+      };
+
+      const buf = encodeEapPacket(packet);
+      const decoded = decodeEapPacket(buf);
+      const decodedAttr = decoded.attributes!.find((a) => a.type === AT.AT_COUNTER_TOO_SMALL)!;
+      expect(decodedAttr).toBeDefined();
+      expect(decodedAttr.value.length).toBe(0);
+    });
+  });
+
+  describe('AT_NONCE_S', () => {
+    it('round-trips 16-byte nonce', () => {
+      const nonceS = Buffer.alloc(16, 0x55);
+
+      const packet: EapPacket = {
+        code: EAP_CODE.REQUEST,
+        identifier: 7,
+        type: EAP_TYPE_AKA,
+        subtype: AKA_SUBTYPE.REAUTHENTICATION,
+        attributes: [
+          { type: AT.AT_NONCE_S, value: nonceS },
+        ],
+      };
+
+      const buf = encodeEapPacket(packet);
+      const decoded = decodeEapPacket(buf);
+      const decodedNonce = decoded.attributes!.find((a) => a.type === AT.AT_NONCE_S)!;
+      expect(decodedNonce.value).toEqual(nonceS);
+      expect(decodedNonce.value.length).toBe(16);
+    });
+  });
+
+  describe('AT_NEXT_REAUTH_ID', () => {
+    it('round-trips UTF-8 identity string', () => {
+      const identity = 'test-reauth-id-abc123';
+      const identityBuf = Buffer.from(identity, 'utf-8');
+
+      const packet: EapPacket = {
+        code: EAP_CODE.REQUEST,
+        identifier: 8,
+        type: EAP_TYPE_AKA,
+        subtype: AKA_SUBTYPE.REAUTHENTICATION,
+        attributes: [
+          { type: AT.AT_NEXT_REAUTH_ID, value: identityBuf },
+        ],
+      };
+
+      const buf = encodeEapPacket(packet);
+      const decoded = decodeEapPacket(buf);
+      const decodedId = decoded.attributes!.find((a) => a.type === AT.AT_NEXT_REAUTH_ID)!;
+      expect(decodedId.value.toString('utf-8')).toBe(identity);
+    });
+
+    it('handles short identity with padding correctly', () => {
+      const identity = 'a';
+      const identityBuf = Buffer.from(identity, 'utf-8');
+
+      const packet: EapPacket = {
+        code: EAP_CODE.REQUEST,
+        identifier: 9,
+        type: EAP_TYPE_AKA,
+        subtype: AKA_SUBTYPE.REAUTHENTICATION,
+        attributes: [
+          { type: AT.AT_NEXT_REAUTH_ID, value: identityBuf },
+        ],
+      };
+
+      const buf = encodeEapPacket(packet);
+      const decoded = decodeEapPacket(buf);
+      const decodedId = decoded.attributes!.find((a) => a.type === AT.AT_NEXT_REAUTH_ID)!;
+      expect(decodedId.value.toString('utf-8')).toBe('a');
+    });
+  });
+
   describe('Malformed packets', () => {
     it('rejects packets shorter than 4 bytes', () => {
       expect(() => decodeEapPacket(Buffer.alloc(2))).toThrow('too short');

@@ -128,6 +128,38 @@ export function computeMac(kAut: Buffer, eapPacketWithZeroMac: Buffer): Buffer {
 }
 
 /**
+ * Derive new session keys for EAP-AKA fast re-authentication.
+ * Per RFC 4187 Section 7:
+ *
+ * XKEY' = SHA-1(Identity | counter(2 bytes BE) | NONCE_S | MK)
+ * PRF(XKEY', 128) → MSK'(64) | EMSK'(64)
+ *
+ * K_aut and K_encr are NOT re-derived — they persist from the original full auth.
+ */
+export function deriveReauthKeys(
+  identity: string,
+  counter: number,
+  nonceS: Buffer,
+  mk: Buffer,
+): { msk: Buffer; emsk: Buffer } {
+  const hash = crypto.createHash('sha1');
+  hash.update(Buffer.from(identity, 'utf-8'));
+  const counterBuf = Buffer.alloc(2);
+  counterBuf.writeUInt16BE(counter, 0);
+  hash.update(counterBuf);
+  hash.update(nonceS);
+  hash.update(mk);
+  const xkeyPrime = hash.digest();
+
+  const prfOutput = prfSha1(xkeyPrime, 128);
+
+  return {
+    msk: prfOutput.subarray(0, 64),
+    emsk: prfOutput.subarray(64, 128),
+  };
+}
+
+/**
  * Verify the AT_MAC in a received EAP packet.
  *
  * Zeros the MAC field in a copy of the packet bytes, recomputes, and

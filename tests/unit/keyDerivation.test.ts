@@ -5,6 +5,7 @@ import {
   deriveMasterKey,
   prfSha1,
   deriveKeys,
+  deriveReauthKeys,
   computeMac,
   verifyMac,
 } from '../../src/auth/keyDerivation.js';
@@ -99,6 +100,51 @@ describe('Key Derivation', () => {
       const keys2 = deriveKeys(identity, testIk, differentCk);
 
       expect(keys1.kAut).not.toEqual(keys2.kAut);
+    });
+  });
+
+  describe('deriveReauthKeys', () => {
+    const mk = Buffer.alloc(20, 0x42);
+    const nonceS = crypto.randomBytes(16);
+    const identity = 'test-reauth-identity';
+
+    it('produces MSK of 64 bytes and EMSK of 64 bytes', () => {
+      const keys = deriveReauthKeys(identity, 1, nonceS, mk);
+      expect(keys.msk.length).toBe(64);
+      expect(keys.emsk.length).toBe(64);
+    });
+
+    it('produces deterministic output', () => {
+      const keys1 = deriveReauthKeys(identity, 1, nonceS, mk);
+      const keys2 = deriveReauthKeys(identity, 1, nonceS, mk);
+      expect(keys1.msk).toEqual(keys2.msk);
+      expect(keys1.emsk).toEqual(keys2.emsk);
+    });
+
+    it('produces different keys for different counters', () => {
+      const keys1 = deriveReauthKeys(identity, 1, nonceS, mk);
+      const keys2 = deriveReauthKeys(identity, 2, nonceS, mk);
+      expect(keys1.msk).not.toEqual(keys2.msk);
+    });
+
+    it('produces different keys for different nonces', () => {
+      const nonceS2 = crypto.randomBytes(16);
+      const keys1 = deriveReauthKeys(identity, 1, nonceS, mk);
+      const keys2 = deriveReauthKeys(identity, 1, nonceS2, mk);
+      expect(keys1.msk).not.toEqual(keys2.msk);
+    });
+
+    it('produces different keys for different identities', () => {
+      const keys1 = deriveReauthKeys(identity, 1, nonceS, mk);
+      const keys2 = deriveReauthKeys('different-identity', 1, nonceS, mk);
+      expect(keys1.msk).not.toEqual(keys2.msk);
+    });
+
+    it('produces different keys for different MKs', () => {
+      const mk2 = Buffer.alloc(20, 0x99);
+      const keys1 = deriveReauthKeys(identity, 1, nonceS, mk);
+      const keys2 = deriveReauthKeys(identity, 1, nonceS, mk2);
+      expect(keys1.msk).not.toEqual(keys2.msk);
     });
   });
 

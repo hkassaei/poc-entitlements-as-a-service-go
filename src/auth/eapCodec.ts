@@ -22,6 +22,7 @@ export const AKA_SUBTYPE = {
   AUTH_REJECT: 2,
   SYNC_FAILURE: 4,
   IDENTITY: 5,
+  REAUTHENTICATION: 13,
 } as const;
 
 export const AT = {
@@ -29,7 +30,14 @@ export const AT = {
   AT_AUTN: 2,
   AT_RES: 3,
   AT_AUTS: 4,
+  AT_PADDING: 6,
   AT_MAC: 11,
+  AT_NEXT_REAUTH_ID: 14,
+  AT_COUNTER: 19,
+  AT_COUNTER_TOO_SMALL: 20,
+  AT_NONCE_S: 21,
+  AT_IV: 129,
+  AT_ENCR_DATA: 130,
 } as const;
 
 export type EapCode = (typeof EAP_CODE)[keyof typeof EAP_CODE];
@@ -51,14 +59,16 @@ export interface EapPacket {
 /**
  * Encode an EAP attribute into its TLV binary representation.
  */
-function encodeAttribute(attr: EapAttribute): Buffer {
+export function encodeAttribute(attr: EapAttribute): Buffer {
   const type = attr.type;
   let valuePayload: Buffer;
 
   switch (type) {
     case AT.AT_RAND:
     case AT.AT_AUTN:
-    case AT.AT_MAC: {
+    case AT.AT_MAC:
+    case AT.AT_IV:
+    case AT.AT_NONCE_S: {
       // 2 reserved bytes + 16 bytes value = 18 bytes payload, length=5 (20 bytes total)
       valuePayload = Buffer.alloc(18);
       attr.value.copy(valuePayload, 2, 0, 16);
@@ -78,6 +88,38 @@ function encodeAttribute(attr: EapAttribute): Buffer {
       // 2 reserved bytes + 14 bytes AUTS = 16 bytes payload, length=4
       valuePayload = Buffer.alloc(16);
       attr.value.copy(valuePayload, 2, 0, 14);
+      break;
+    }
+    case AT.AT_COUNTER: {
+      // 2-byte big-endian counter value, length=1 (4 bytes total)
+      valuePayload = Buffer.alloc(2);
+      valuePayload.writeUInt16BE(attr.value.readUInt16BE(0), 0);
+      break;
+    }
+    case AT.AT_COUNTER_TOO_SMALL: {
+      // 2 reserved bytes, no value, length=1 (4 bytes total)
+      valuePayload = Buffer.alloc(2);
+      break;
+    }
+    case AT.AT_PADDING: {
+      // attr.value.length contains the padding bytes (zeros)
+      valuePayload = Buffer.alloc(attr.value.length);
+      break;
+    }
+    case AT.AT_ENCR_DATA: {
+      // 2 reserved bytes + variable-length ciphertext
+      valuePayload = Buffer.alloc(2 + attr.value.length);
+      attr.value.copy(valuePayload, 2);
+      break;
+    }
+    case AT.AT_NEXT_REAUTH_ID: {
+      // 2-byte actual-length prefix + UTF-8 identity + padding to 4-byte boundary
+      const identityBytes = attr.value;
+      const actualLen = identityBytes.length;
+      const totalAttrLen = Math.ceil((2 + 2 + actualLen) / 4) * 4;
+      valuePayload = Buffer.alloc(totalAttrLen - 2); // subtract type+length bytes
+      valuePayload.writeUInt16BE(actualLen, 0);
+      identityBytes.copy(valuePayload, 2);
       break;
     }
     default: {
@@ -119,7 +161,9 @@ function decodeAttribute(buf: Buffer, offset: number): { attr: EapAttribute; byt
   switch (type) {
     case AT.AT_RAND:
     case AT.AT_AUTN:
-    case AT.AT_MAC: {
+    case AT.AT_MAC:
+    case AT.AT_IV:
+    case AT.AT_NONCE_S: {
       // Skip 2 reserved bytes, read 16 bytes
       value = Buffer.alloc(16);
       buf.copy(value, 0, offset + 4, offset + 20);
@@ -137,6 +181,37 @@ function decodeAttribute(buf: Buffer, offset: number): { attr: EapAttribute; byt
       // Skip 2 reserved bytes, read 14 bytes
       value = Buffer.alloc(14);
       buf.copy(value, 0, offset + 4, offset + 18);
+      break;
+    }
+    case AT.AT_COUNTER: {
+      // 2-byte big-endian counter after type+length header
+      value = Buffer.alloc(2);
+      buf.copy(value, 0, offset + 2, offset + 4);
+      break;
+    }
+    case AT.AT_COUNTER_TOO_SMALL: {
+      // No meaningful value — 2 reserved bytes
+      value = Buffer.alloc(0);
+      break;
+    }
+    case AT.AT_PADDING: {
+      // Padding bytes after type+length header
+      value = Buffer.alloc(totalBytes - 2);
+      buf.copy(value, 0, offset + 2, offset + totalBytes);
+      break;
+    }
+    case AT.AT_ENCR_DATA: {
+      // Skip 2 reserved bytes, rest is ciphertext
+      const ciphertextLen = totalBytes - 4; // subtract type(1)+length(1)+reserved(2)
+      value = Buffer.alloc(ciphertextLen);
+      buf.copy(value, 0, offset + 4, offset + 4 + ciphertextLen);
+      break;
+    }
+    case AT.AT_NEXT_REAUTH_ID: {
+      // 2-byte actual-length prefix after type+length header
+      const actualLen = buf.readUInt16BE(offset + 2);
+      value = Buffer.alloc(actualLen);
+      buf.copy(value, 0, offset + 4, offset + 4 + actualLen);
       break;
     }
     default: {

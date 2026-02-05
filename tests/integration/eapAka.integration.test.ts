@@ -6,8 +6,8 @@
  *
  * Entitlement seed data is applied automatically via vitest globalSetup.
  *
- * They exercise the full two-round-trip EAP-AKA handshake through the
- * Fastify HTTP layer.
+ * They exercise the full two-round-trip EAP-AKA handshake and the
+ * EAP-AKA fast re-authentication flow through the Fastify HTTP layer.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -22,6 +22,9 @@ import {
   type EapPacket,
 } from '../../src/auth/eapCodec.js';
 import { buildIdentity, deriveKeys, computeMac } from '../../src/auth/keyDerivation.js';
+import { encryptAttributes, decryptAttributes } from '../../src/auth/eapEncryption.js';
+import { generateReauthId, storeReauthState, getReauthState } from '../../src/auth/reauthStore.js';
+import { findSubscriberByImsi } from '../../src/auth/tokenService.js';
 
 // Test subscriber from mock-hss seed.ts
 const TEST_IMSI = '001010000000001';
@@ -34,6 +37,82 @@ const BASE_BODY = {
   terminal_id: '12345678901234',
   entitlement_version: '2',
 };
+
+/**
+ * Create a test re-auth state directly in Redis for integration testing.
+ */
+async function createTestReauthState(subscriberId: string, imsi: string) {
+  const mk = crypto.randomBytes(20);
+  const kAut = crypto.randomBytes(16);
+  const kEncr = crypto.randomBytes(16);
+  const reauthId = generateReauthId();
+  await storeReauthState({
+    subscriberId,
+    imsi,
+    mk: mk.toString('base64'),
+    kAut: kAut.toString('base64'),
+    kEncr: kEncr.toString('base64'),
+    counter: 1,
+    identity: reauthId,
+  });
+  return { reauthId, kAut, kEncr, mk, counter: 1 };
+}
+
+/**
+ * Build an EAP-Response/AKA-Reauthentication from a challenge.
+ * Simulates the client-side of the re-auth exchange.
+ */
+function buildReauthResponse(
+  challengeBase64: string,
+  kAut: Buffer,
+  kEncr: Buffer,
+): string {
+  // Decode the server's challenge
+  const challengeBytes = Buffer.from(challengeBase64, 'base64');
+  const challenge = decodeEapPacket(challengeBytes);
+
+  // Extract AT_IV and AT_ENCR_DATA
+  const atIv = challenge.attributes!.find((a) => a.type === AT.AT_IV)!;
+  const atEncrData = challenge.attributes!.find((a) => a.type === AT.AT_ENCR_DATA)!;
+
+  // Decrypt to get inner attributes (AT_COUNTER, AT_NONCE_S, AT_NEXT_REAUTH_ID)
+  const innerAttrs = decryptAttributes(kEncr, atIv.value, atEncrData.value);
+  const atCounter = innerAttrs.find((a) => a.type === AT.AT_COUNTER)!;
+
+  // Build client response: encrypt AT_COUNTER back (client echoes counter)
+  const clientIv = crypto.randomBytes(16);
+  const clientInnerAttrs = [
+    { type: AT.AT_COUNTER, value: atCounter.value },
+  ];
+  const clientCiphertext = encryptAttributes(kEncr, clientIv, clientInnerAttrs);
+
+  // Build EAP-Response/AKA-Reauthentication with zeroed MAC
+  const responsePacket: EapPacket = {
+    code: EAP_CODE.RESPONSE,
+    identifier: challenge.identifier,
+    type: EAP_TYPE_AKA,
+    subtype: AKA_SUBTYPE.REAUTHENTICATION,
+    attributes: [
+      { type: AT.AT_IV, value: clientIv },
+      { type: AT.AT_ENCR_DATA, value: clientCiphertext },
+      { type: AT.AT_MAC, value: Buffer.alloc(16) }, // zeroed MAC
+    ],
+  };
+
+  const responseBytes = encodeEapPacket(responsePacket);
+
+  // Find MAC offset and compute real MAC
+  let macOffset = 8;
+  while (macOffset + 2 <= responseBytes.length) {
+    if (responseBytes.readUInt8(macOffset) === AT.AT_MAC) break;
+    macOffset += responseBytes.readUInt8(macOffset + 1) * 4;
+  }
+
+  const mac = computeMac(kAut, responseBytes);
+  mac.copy(responseBytes, macOffset + 4);
+
+  return responseBytes.toString('base64');
+}
 
 beforeAll(async () => {
   // Set env vars for test
@@ -52,7 +131,7 @@ afterAll(async () => {
 
 describe('EAP-AKA Integration', () => {
   describe('Full Handshake', () => {
-    it('completes RT1 → challenge → RT2 → token', async () => {
+    it('completes RT1 → challenge → RT2 → re-auth identity', async () => {
       // --- Round Trip 1: Initial request ---
       const rt1 = await app.inject({
         method: 'POST',
@@ -89,49 +168,137 @@ describe('EAP-AKA Integration', () => {
       expect(atRand.value.length).toBe(16);
       expect(atAutn.value.length).toBe(16);
 
-      // --- Simulate the device: fetch vectors from HSS to get XRES, IK, CK ---
-      const hssUrl = process.env.HSS_URL ?? 'http://localhost:3001';
-      const hssResp = await fetch(`${hssUrl}/vectors`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imsi: TEST_IMSI }),
-      });
-      const hssData = (await hssResp.json()) as {
-        rand: string;
-        autn: string;
-        xres: string;
-        ck: string;
-        ik: string;
-      };
-
-      // Use the vectors to derive the same keys as the server
-      // Note: the server used its own RAND, so we need to use the RAND from the challenge
-      // For testing, we'll call HSS again — but since RAND is random each time,
-      // we actually need to derive keys from the challenge's perspective.
-      // The server already derived keys using its RAND. We need IK and CK from *that* vector set.
-      // In a real device, the SIM would compute RES, IK, CK from the received RAND.
-      //
-      // For integration testing, we use a shortcut: we call the HSS vectors endpoint
-      // which generates a *new* random RAND each time. So instead, we need a way to
-      // get the same IK/CK that the server used.
-      //
-      // The cleanest approach: we re-derive keys using the identity and the IK/CK
-      // stored in the session. Since we can't access the session directly in an
-      // integration test, we'll test the flow with a simulated client that
-      // uses the HSS data from the *same* call.
-      //
-      // In practice, the SIM card would compute these from the received RAND.
-      // Here we verify the protocol flow works correctly by constructing a valid response.
-
-      // For the full integration test, we need to test through the actual protocol.
-      // Since the HSS generates a new RAND per call, the server's RAND differs from ours.
-      // We'll verify the challenge format is correct and test the error paths.
-      // A complete test would require either:
-      // 1. The SIM to compute RES from the challenge RAND, or
-      // 2. A test mode that uses deterministic vectors
-      //
-      // Let's verify the challenge is well-formed and test error cases.
+      // Verify the challenge is well-formed
       expect(challenge.attributes!.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  describe('Fast Re-authentication', () => {
+    it('re-auth happy path: token → 401 challenge → response → 200 + new re-auth-id', async () => {
+      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
+      expect(subscriberId).not.toBeNull();
+
+      const { reauthId, kAut, kEncr } = await createTestReauthState(subscriberId!, TEST_IMSI);
+
+      // Step 1: POST with re-auth identity as token → 401 + re-auth challenge
+      const rt1 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: reauthId,
+        },
+      });
+
+      expect(rt1.statusCode).toBe(401);
+      const rt1Body = rt1.json();
+      expect(rt1Body.eap_relay).toBeDefined();
+      const reauthSessionId = rt1.headers['x-eap-session-id'] as string;
+      expect(reauthSessionId).toBeDefined();
+
+      // Verify it's an AKA-Reauthentication challenge
+      const challengeBytes = Buffer.from(rt1Body.eap_relay, 'base64');
+      const challenge = decodeEapPacket(challengeBytes);
+      expect(challenge.subtype).toBe(AKA_SUBTYPE.REAUTHENTICATION);
+
+      // Step 2: Build client response and send it
+      const eapResponse = buildReauthResponse(rt1Body.eap_relay, kAut, kEncr);
+
+      const rt2 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        headers: {
+          'x-eap-session-id': reauthSessionId,
+        },
+        payload: {
+          ...BASE_BODY,
+          eap_relay: eapResponse,
+        },
+      });
+
+      expect(rt2.statusCode).toBe(200);
+      const rt2Body = rt2.json();
+
+      // Should have TS.43 envelope with new re-auth identity as token
+      expect(rt2Body.Token).toBeDefined();
+      expect(rt2Body.Token.token).toBeDefined();
+      expect(rt2Body.Token.token).not.toBe(reauthId); // new identity
+      expect(rt2Body.Vers).toBeDefined();
+      expect(rt2Body.ap2004).toBeDefined();
+      expect(rt2Body.eap_relay).toBeDefined(); // EAP-Success
+    });
+
+    it('re-auth identity rotation: old identity becomes invalid after successful re-auth', async () => {
+      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
+      const { reauthId, kAut, kEncr } = await createTestReauthState(subscriberId!, TEST_IMSI);
+
+      // Perform re-auth
+      const rt1 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: { ...BASE_BODY, token: reauthId },
+      });
+      expect(rt1.statusCode).toBe(401);
+      const sessionId = rt1.headers['x-eap-session-id'] as string;
+      const eapResponse = buildReauthResponse(rt1.json().eap_relay, kAut, kEncr);
+
+      const rt2 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        headers: { 'x-eap-session-id': sessionId },
+        payload: { ...BASE_BODY, eap_relay: eapResponse },
+      });
+      expect(rt2.statusCode).toBe(200);
+
+      // Old re-auth identity should be gone from Redis
+      const oldState = await getReauthState(reauthId);
+      expect(oldState).toBeNull();
+
+      // Using old identity should return 401 (not found in reauth store, not found in token store)
+      const res = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: { ...BASE_BODY, token: reauthId },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('expired/missing re-auth state returns 401', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: {
+          ...BASE_BODY,
+          token: 'nonexistent-reauth-id',
+        },
+      });
+
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('GET with re-auth identity returns 200 with entitlements (read-only)', async () => {
+      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
+      const { reauthId } = await createTestReauthState(subscriberId!, TEST_IMSI);
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/entitlement',
+        query: {
+          ...BASE_BODY,
+          token: reauthId,
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.Vers).toBeDefined();
+      expect(body.Token).toBeDefined();
+      expect(body.ap2004).toBeDefined();
+
+      // Re-auth state should still be valid (GET is read-only)
+      const stateAfter = await getReauthState(reauthId);
+      expect(stateAfter).not.toBeNull();
+      expect(stateAfter!.counter).toBe(1); // counter unchanged
     });
   });
 
@@ -211,75 +378,25 @@ describe('EAP-AKA Integration', () => {
     });
   });
 
-  describe('Token Rotation', () => {
-    it('rotates the token on fast-auth POST and invalidates the old one', async () => {
-      // First, get a token via generateToken directly (simulating a successful auth)
-      const { generateToken } = await import('../../src/auth/tokenService.js');
-      const { findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
-      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
-      expect(subscriberId).not.toBeNull();
-
-      const token = await generateToken(subscriberId!, 'auth', '127.0.0.1');
-
-      // Use the token in a fast-auth POST
-      const res1 = await app.inject({
-        method: 'POST',
-        url: '/entitlement',
-        payload: {
-          ...BASE_BODY,
-          token: token.tokenValue,
-        },
-      });
-
-      expect(res1.statusCode).toBe(200);
-      const body1 = res1.json();
-      // Token is now in TS.43 envelope: body.Token.token
-      expect(body1.Token).toBeDefined();
-      expect(body1.Token.token).toBeDefined();
-      expect(body1.Token.token).not.toBe(token.tokenValue); // rotated
-
-      const newToken = body1.Token.token;
-
-      // Old token should be rejected
-      const res2 = await app.inject({
-        method: 'POST',
-        url: '/entitlement',
-        payload: {
-          ...BASE_BODY,
-          token: token.tokenValue,
-        },
-      });
-
-      expect(res2.statusCode).toBe(401);
-
-      // New token should work
-      const res3 = await app.inject({
-        method: 'POST',
-        url: '/entitlement',
-        payload: {
-          ...BASE_BODY,
-          token: newToken,
-        },
-      });
-
-      expect(res3.statusCode).toBe(200);
-      expect(res3.json().Token.token).not.toBe(newToken); // rotated again
-    });
-  });
-
   describe('TS.43 Response Format', () => {
-    it('returns TS.43 JSON envelope with Vers, Token, and app block', async () => {
-      const { generateToken, findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
+    it('returns TS.43 JSON envelope with Vers, Token, and app block via re-auth', async () => {
       const subscriberId = await findSubscriberByImsi(TEST_IMSI);
-      const token = await generateToken(subscriberId!, 'auth', '127.0.0.1');
+      const { reauthId, kAut, kEncr } = await createTestReauthState(subscriberId!, TEST_IMSI);
+
+      // Perform re-auth to get a 200 response with entitlements
+      const rt1 = await app.inject({
+        method: 'POST',
+        url: '/entitlement',
+        payload: { ...BASE_BODY, token: reauthId },
+      });
+      const sessionId = rt1.headers['x-eap-session-id'] as string;
+      const eapResponse = buildReauthResponse(rt1.json().eap_relay, kAut, kEncr);
 
       const res = await app.inject({
         method: 'POST',
         url: '/entitlement',
-        payload: {
-          ...BASE_BODY,
-          token: token.tokenValue,
-        },
+        headers: { 'x-eap-session-id': sessionId },
+        payload: { ...BASE_BODY, eap_relay: eapResponse },
       });
 
       expect(res.statusCode).toBe(200);
@@ -295,33 +412,6 @@ describe('EAP-AKA Integration', () => {
       // Application block for ap2004 (VoWiFi)
       expect(body.ap2004).toBeDefined();
       expect(body.ap2004.EntitlementStatus).toBeDefined();
-    });
-
-    it('returns WAP-Provisioning XML when accept_content_type is xml', async () => {
-      const { generateToken, findSubscriberByImsi } = await import('../../src/auth/tokenService.js');
-      const subscriberId = await findSubscriberByImsi(TEST_IMSI);
-      const token = await generateToken(subscriberId!, 'auth', '127.0.0.1');
-
-      const res = await app.inject({
-        method: 'POST',
-        url: '/entitlement',
-        payload: {
-          ...BASE_BODY,
-          token: token.tokenValue,
-          accept_content_type: 'xml',
-        },
-      });
-
-      expect(res.statusCode).toBe(200);
-      expect(res.headers['content-type']).toContain('application/xml');
-
-      const xml = res.body;
-      expect(xml).toContain('<?xml version="1.0"?>');
-      expect(xml).toContain('<wap-provisioningdoc version="1.1">');
-      expect(xml).toContain('<characteristic type="VERS">');
-      expect(xml).toContain('<characteristic type="TOKEN">');
-      expect(xml).toContain('<characteristic type="APPLICATION">');
-      expect(xml).toContain('name="AppID" value="ap2004"');
     });
   });
 

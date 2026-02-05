@@ -21,6 +21,7 @@ export interface EapSessionData {
   identifier: string; // numeric string
   kAut: string;    // base64
   kEncr: string;   // base64
+  mk: string;      // base64
 }
 
 function sessionKey(sessionId: string): string {
@@ -40,6 +41,7 @@ export async function createSession(data: {
   identifier: number;
   kAut: Buffer;
   kEncr: Buffer;
+  mk: Buffer;
 }): Promise<string> {
   const sessionId = crypto.randomUUID();
   const key = sessionKey(sessionId);
@@ -54,6 +56,7 @@ export async function createSession(data: {
     identifier: String(data.identifier),
     kAut: data.kAut.toString('base64'),
     kEncr: data.kEncr.toString('base64'),
+    mk: data.mk.toString('base64'),
   };
 
   await redis.hset(key, fields as unknown as Record<string, string>);

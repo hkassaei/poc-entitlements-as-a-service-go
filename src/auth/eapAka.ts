@@ -9,7 +9,7 @@
 
 import crypto from 'node:crypto';
 import { logger } from '../config/logger.js';
-import { EAP_STATE, TOKEN_TYPES } from '../config/constants.js';
+import { EAP_STATE } from '../config/constants.js';
 import {
   EAP_CODE,
   EAP_TYPE_AKA,
@@ -21,10 +21,11 @@ import {
   type EapPacket,
   type EapAttribute,
 } from './eapCodec.js';
-import { buildIdentity, deriveKeys, computeMac, verifyMac } from './keyDerivation.js';
+import { buildIdentity, deriveMasterKey, deriveKeys, computeMac, verifyMac } from './keyDerivation.js';
 import { fetchVectors, HssSubscriberNotFoundError } from './eapAkaVectors.js';
 import { createSession, getSession, deleteSession } from './eapSession.js';
-import { generateToken, findSubscriberByImsi } from './tokenService.js';
+import { findSubscriberByImsi } from './tokenService.js';
+import { generateReauthId, storeReauthState } from './reauthStore.js';
 
 export interface ChallengeResult {
   statusCode: number;
@@ -63,6 +64,7 @@ export async function handleInitialRequest(
 
   // Derive keys
   const identity = buildIdentity(imsi);
+  const mk = deriveMasterKey(identity, vectors.ik, vectors.ck);
   const keys = deriveKeys(identity, vectors.ik, vectors.ck);
 
   const identifier = nextIdentifier();
@@ -93,7 +95,7 @@ export async function handleInitialRequest(
 
   const eapRelay = packetBytes.toString('base64');
 
-  // Store session
+  // Store session (including MK for re-auth identity issuance after successful auth)
   const sessionId = await createSession({
     imsi,
     rand: vectors.rand,
@@ -103,6 +105,7 @@ export async function handleInitialRequest(
     identifier,
     kAut: keys.kAut,
     kEncr: keys.kEncr,
+    mk,
   });
 
   logger.info({ imsi, sessionId }, 'EAP-AKA challenge sent');
@@ -258,7 +261,7 @@ export async function handleEapResponse(
     };
   }
 
-  // Auth successful — find or create subscriber reference, generate token
+  // Auth successful — find or create subscriber reference, issue re-auth identity
   const subscriberId = await findSubscriberByImsi(session.imsi);
   if (!subscriberId) {
     logger.error({ imsi: session.imsi }, 'Subscriber not found in DB after successful auth');
@@ -272,7 +275,17 @@ export async function handleEapResponse(
     };
   }
 
-  const tokenInfo = await generateToken(subscriberId, TOKEN_TYPES.AUTH, clientIp);
+  // Issue re-auth identity (replaces opaque token)
+  const reauthId = generateReauthId();
+  await storeReauthState({
+    subscriberId,
+    imsi: session.imsi,
+    mk: session.mk,
+    kAut: session.kAut,
+    kEncr: session.kEncr,
+    counter: 1,
+    identity: reauthId,
+  });
 
   // Clean up session
   await deleteSession(sessionId);
@@ -283,7 +296,7 @@ export async function handleEapResponse(
 
   return {
     statusCode: 200,
-    token: tokenInfo.tokenValue,
+    token: reauthId,
     subscriberId,
     eapRelay: encodeEapToBase64({
       code: EAP_CODE.SUCCESS,

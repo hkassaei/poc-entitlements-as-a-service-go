@@ -3,18 +3,21 @@ import { EntitlementRequestBody, EntitlementRequestQuery } from '../../protocol/
 import { HTTP_STATUS } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
 import { handleInitialRequest, handleEapResponse } from '../../auth/eapAka.js';
+import { handleReauthRequest, handleReauthResponse } from '../../auth/eapReauth.js';
+import { getReauthState } from '../../auth/reauthStore.js';
+import { getReauthSession } from '../../auth/reauthSession.js';
 import { HssSubscriberNotFoundError } from '../../auth/eapAkaVectors.js';
-import { validateToken, rotateToken, generateTemporaryToken } from '../../auth/tokenService.js';
+import { validateToken, generateTemporaryToken } from '../../auth/tokenService.js';
 import { cacheResponse, getCachedResponse } from '../../auth/eapIdempotency.js';
 import { buildEntitlementResponse } from '../../protocol/responseBuilder.js';
 
 export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
   /**
-   * POST /entitlement — three-path routing:
+   * POST /entitlement — four-path routing:
    *
-   * 1. token present       → validate → rotate → 200 with TS.43 response
-   * 2. eap_relay present   → EAP-AKA Round Trip 2 → 200 + token + TS.43 response
-   * 3. neither (initial)   → EAP-AKA Round Trip 1 → 401 + challenge
+   * 1. eap_relay present   → re-auth RT2 (if reauth session) or full auth RT2
+   * 2. token present        → re-auth RT1 (if reauth state) or ODSA temporary token flow
+   * 3. neither (initial)    → EAP-AKA Round Trip 1 → 401 + challenge
    */
   app.post(
     '/entitlement',
@@ -38,69 +41,7 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
 
       const clientIp = request.ip;
 
-      // --- Path 1: Fast Auth (token present) ---
-      if (body.token) {
-        const tokenInfo = await validateToken(body.token);
-        if (!tokenInfo) {
-          return reply.code(HTTP_STATUS.UNAUTHORIZED).send({
-            error: 'Unauthorized',
-            message: 'Invalid or expired token',
-            statusCode: HTTP_STATUS.UNAUTHORIZED,
-          });
-        }
-
-        // Rotate: revoke old token, issue new one (rolling expiry)
-        const newToken = await rotateToken(
-          body.token,
-          tokenInfo.subscriberId,
-          tokenInfo.tokenType,
-          clientIp,
-        );
-
-        const odsaContext = body.operation
-          ? { operation: body.operation, operationType: body.operation_type }
-          : undefined;
-
-        const formatted = await buildEntitlementResponse(
-          newToken.tokenValue,
-          tokenInfo.subscriberId,
-          body.app,
-          body.accept_content_type,
-          odsaContext,
-        );
-
-        // Handle AcquireTemporaryToken side effect
-        if (
-          body.operation === 'AcquireTemporaryToken' &&
-          (body.app === 'ap2006' || body.app === 'ap2009')
-        ) {
-          const tempToken = await generateTemporaryToken(
-            tokenInfo.subscriberId,
-            clientIp,
-            body.app,
-            [body.operation],
-          );
-          // Inject temporary token into response
-          if (typeof formatted.body === 'object' && formatted.body !== null) {
-            const appBlock = (formatted.body as Record<string, unknown>)[body.app] as
-              | Record<string, unknown>
-              | undefined;
-            if (appBlock) {
-              appBlock.TemporaryToken = tempToken.tokenValue;
-              appBlock.TemporaryTokenValidity = String(
-                Math.floor((tempToken.expiresAt.getTime() - Date.now()) / 1000),
-              );
-            }
-          }
-        }
-
-        return reply
-          .code(HTTP_STATUS.OK)
-          .type(formatted.contentType)
-          .send(formatted.body);
-      }
-
-      // --- Path 2: EAP-AKA Response (eap_relay present) ---
+      // --- Path 1: EAP Response (eap_relay present) ---
       if (body.eap_relay) {
         const sessionId = request.headers['x-eap-session-id'] as string | undefined;
         if (!sessionId) {
@@ -118,6 +59,88 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           return reply.code(HTTP_STATUS.OK).send(cached);
         }
 
+        // Path 1a: Try re-auth session first
+        const reauthSession = await getReauthSession(sessionId);
+        if (reauthSession) {
+          const reauthResult = await handleReauthResponse(body.eap_relay, sessionId, clientIp);
+
+          if (reauthResult.statusCode === 200 && reauthResult.reauthId) {
+            const odsaCtx = body.operation
+              ? { operation: body.operation, operationType: body.operation_type }
+              : undefined;
+
+            const formatted = await buildEntitlementResponse(
+              reauthResult.reauthId,
+              reauthResult.subscriberId!,
+              body.app,
+              body.accept_content_type,
+              odsaCtx,
+            );
+
+            // Handle AcquireTemporaryToken side effect
+            if (
+              body.operation === 'AcquireTemporaryToken' &&
+              (body.app === 'ap2006' || body.app === 'ap2009')
+            ) {
+              const tempToken = await generateTemporaryToken(
+                reauthResult.subscriberId!,
+                clientIp,
+                body.app,
+                [body.operation],
+              );
+              if (typeof formatted.body === 'object' && formatted.body !== null) {
+                const appBlock = (formatted.body as Record<string, unknown>)[body.app] as
+                  | Record<string, unknown>
+                  | undefined;
+                if (appBlock) {
+                  appBlock.TemporaryToken = tempToken.tokenValue;
+                  appBlock.TemporaryTokenValidity = String(
+                    Math.floor((tempToken.expiresAt.getTime() - Date.now()) / 1000),
+                  );
+                }
+              }
+            }
+
+            // Cache the response
+            const cacheData = typeof formatted.body === 'string'
+              ? { _xml: formatted.body, eap_relay: reauthResult.eapRelay }
+              : { ...(formatted.body as object), eap_relay: reauthResult.eapRelay };
+            await cacheResponse(sessionId, body.eap_relay, cacheData);
+
+            if (typeof formatted.body === 'string') {
+              return reply
+                .code(HTTP_STATUS.OK)
+                .type(formatted.contentType)
+                .send(formatted.body);
+            }
+
+            return reply.code(HTTP_STATUS.OK).send({
+              ...(formatted.body as object),
+              eap_relay: reauthResult.eapRelay,
+            });
+          }
+
+          // Counter-too-small fallback: re-auth returned 401 + new sessionId for full auth
+          if (reauthResult.statusCode === 401 && reauthResult.sessionId) {
+            return reply
+              .code(HTTP_STATUS.UNAUTHORIZED)
+              .header('X-EAP-Session-Id', reauthResult.sessionId)
+              .send({
+                eap_relay: reauthResult.eapRelay,
+                statusCode: HTTP_STATUS.UNAUTHORIZED,
+              });
+          }
+
+          // Re-auth failed
+          return reply.code(HTTP_STATUS.UNAUTHORIZED).send({
+            error: 'Unauthorized',
+            message: 'Re-authentication failed',
+            eap_relay: reauthResult.eapRelay,
+            statusCode: HTTP_STATUS.UNAUTHORIZED,
+          });
+        }
+
+        // Path 1b: Full auth RT2 (existing flow)
         const result = await handleEapResponse(body.eap_relay, sessionId, clientIp);
 
         if (result.statusCode === 200 && result.token) {
@@ -141,8 +164,6 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           await cacheResponse(sessionId, body.eap_relay, cacheData);
 
           if (typeof formatted.body === 'string') {
-            // XML response — prepend eap_relay info is not applicable in XML
-            // Return the XML body directly
             return reply
               .code(HTTP_STATUS.OK)
               .type(formatted.contentType)
@@ -162,6 +183,76 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           eap_relay: result.eapRelay,
           statusCode: HTTP_STATUS.UNAUTHORIZED,
         });
+      }
+
+      // --- Path 2: Token present (re-auth RT1 or ODSA temporary token) ---
+      if (body.token) {
+        // Path 2a: Try re-auth state first (re-auth identity → initiate re-auth challenge)
+        const reauthState = await getReauthState(body.token);
+        if (reauthState) {
+          const reauthChallenge = await handleReauthRequest(body.token, clientIp);
+          if (reauthChallenge) {
+            return reply
+              .code(HTTP_STATUS.UNAUTHORIZED)
+              .header('X-EAP-Session-Id', reauthChallenge.sessionId)
+              .send({
+                eap_relay: reauthChallenge.eapRelay,
+                statusCode: HTTP_STATUS.UNAUTHORIZED,
+              });
+          }
+          // Re-auth state found but counter exhausted — fall through to check ODSA token
+        }
+
+        // Path 2b: ODSA temporary token (existing flow)
+        const tokenInfo = await validateToken(body.token);
+        if (!tokenInfo) {
+          return reply.code(HTTP_STATUS.UNAUTHORIZED).send({
+            error: 'Unauthorized',
+            message: 'Invalid or expired token',
+            statusCode: HTTP_STATUS.UNAUTHORIZED,
+          });
+        }
+
+        const odsaContext = body.operation
+          ? { operation: body.operation, operationType: body.operation_type }
+          : undefined;
+
+        const formatted = await buildEntitlementResponse(
+          body.token,
+          tokenInfo.subscriberId,
+          body.app,
+          body.accept_content_type,
+          odsaContext,
+        );
+
+        // Handle AcquireTemporaryToken side effect
+        if (
+          body.operation === 'AcquireTemporaryToken' &&
+          (body.app === 'ap2006' || body.app === 'ap2009')
+        ) {
+          const tempToken = await generateTemporaryToken(
+            tokenInfo.subscriberId,
+            clientIp,
+            body.app,
+            [body.operation],
+          );
+          if (typeof formatted.body === 'object' && formatted.body !== null) {
+            const appBlock = (formatted.body as Record<string, unknown>)[body.app] as
+              | Record<string, unknown>
+              | undefined;
+            if (appBlock) {
+              appBlock.TemporaryToken = tempToken.tokenValue;
+              appBlock.TemporaryTokenValidity = String(
+                Math.floor((tempToken.expiresAt.getTime() - Date.now()) / 1000),
+              );
+            }
+          }
+        }
+
+        return reply
+          .code(HTTP_STATUS.OK)
+          .type(formatted.contentType)
+          .send(formatted.body);
       }
 
       // --- Path 3: Initial Request (no token, no eap_relay) ---
@@ -225,6 +316,28 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      const odsaCtxGet = query.operation
+        ? { operation: query.operation, operationType: query.operation_type ? parseInt(query.operation_type, 10) : undefined }
+        : undefined;
+
+      // Try re-auth state first (read-only, no counter change)
+      const reauthStateGet = await getReauthState(query.token);
+      if (reauthStateGet) {
+        const formatted = await buildEntitlementResponse(
+          query.token,
+          reauthStateGet.subscriberId,
+          query.app,
+          query.accept_content_type,
+          odsaCtxGet,
+        );
+
+        return reply
+          .code(HTTP_STATUS.OK)
+          .type(formatted.contentType)
+          .send(formatted.body);
+      }
+
+      // Fall back to ODSA temporary token
       const tokenInfo = await validateToken(query.token);
       if (!tokenInfo) {
         return reply.code(HTTP_STATUS.UNAUTHORIZED).send({
@@ -233,10 +346,6 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           statusCode: HTTP_STATUS.UNAUTHORIZED,
         });
       }
-
-      const odsaCtxGet = query.operation
-        ? { operation: query.operation, operationType: query.operation_type ? parseInt(query.operation_type, 10) : undefined }
-        : undefined;
 
       const formatted = await buildEntitlementResponse(
         query.token,
