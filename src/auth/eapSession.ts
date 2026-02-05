@@ -81,17 +81,6 @@ export async function getSession(sessionId: string): Promise<EapSessionData | nu
 }
 
 /**
- * Update the state of an existing session.
- */
-export async function updateSessionState(
-  sessionId: string,
-  state: string,
-): Promise<void> {
-  const key = sessionKey(sessionId);
-  await redis.hset(key, 'state', state);
-}
-
-/**
  * Delete an EAP session (after successful auth or failure).
  */
 export async function deleteSession(sessionId: string): Promise<void> {

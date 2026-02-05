@@ -123,17 +123,6 @@ export async function validateToken(tokenValue: string): Promise<TokenInfo | nul
 }
 
 /**
- * Revoke a token by deleting it from Redis and marking it consumed in Postgres.
- */
-export async function revokeToken(tokenValue: string): Promise<void> {
-  await redis.del(tokenCacheKey(tokenValue));
-  await db
-    .update(tokens)
-    .set({ consumed: true })
-    .where(eq(tokens.tokenValue, tokenValue));
-}
-
-/**
  * Generate a temporary token for ODSA operations.
  * Stores scope and operation targets in both Postgres and Redis.
  */

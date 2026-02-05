@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { generateToken, validateToken, revokeToken } from '../../src/auth/tokenService.js';
+import { generateToken, validateToken } from '../../src/auth/tokenService.js';
 import { db } from '../../src/db/index.js';
 import { redis } from '../../src/db/redis.js';
 import { tokens } from '../../src/db/schema.js';
@@ -50,50 +50,42 @@ function trackToken(tokenValue: string) {
 }
 
 describe('Token Service', () => {
-  describe('revokeToken', () => {
-    it('marks the token as consumed in Postgres', async () => {
+  describe('generateToken', () => {
+    it('creates a token in Postgres and Redis', async () => {
       const token = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
       trackToken(token.tokenValue);
 
-      await revokeToken(token.tokenValue);
+      expect(token.tokenValue).toBeDefined();
+      expect(token.subscriberId).toBe(testSubscriberId);
+      expect(token.tokenType).toBe(TOKEN_TYPES.AUTH);
 
+      // Check Redis
+      const cached = await redis.get(`token:${token.tokenValue}`);
+      expect(cached).not.toBeNull();
+
+      // Check Postgres
       const rows = await db
-        .select({ consumed: tokens.consumed })
+        .select()
         .from(tokens)
         .where(eq(tokens.tokenValue, token.tokenValue))
         .limit(1);
-
-      expect(rows[0]!.consumed).toBe(true);
-    });
-
-    it('removes the token from Redis cache', async () => {
-      const token = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
-      trackToken(token.tokenValue);
-
-      // Confirm it's in Redis
-      const before = await redis.get(`token:${token.tokenValue}`);
-      expect(before).not.toBeNull();
-
-      await revokeToken(token.tokenValue);
-
-      const after = await redis.get(`token:${token.tokenValue}`);
-      expect(after).toBeNull();
-    });
-
-    it('makes the token fail validation', async () => {
-      const token = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
-      trackToken(token.tokenValue);
-
-      // Valid before revocation
-      const validBefore = await validateToken(token.tokenValue);
-      expect(validBefore).not.toBeNull();
-
-      await revokeToken(token.tokenValue);
-
-      // Invalid after revocation
-      const validAfter = await validateToken(token.tokenValue);
-      expect(validAfter).toBeNull();
+      expect(rows.length).toBe(1);
     });
   });
 
+  describe('validateToken', () => {
+    it('returns token info for valid token', async () => {
+      const token = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
+      trackToken(token.tokenValue);
+
+      const result = await validateToken(token.tokenValue);
+      expect(result).not.toBeNull();
+      expect(result!.subscriberId).toBe(testSubscriberId);
+    });
+
+    it('returns null for non-existent token', async () => {
+      const result = await validateToken('nonexistent-token-value');
+      expect(result).toBeNull();
+    });
+  });
 });

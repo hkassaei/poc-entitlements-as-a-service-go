@@ -14,5 +14,3 @@ export const AppId = {
 } as const;
 
 export type AppIdValue = keyof typeof AppId;
-
-export const ALL_APP_ID_VALUES = Object.keys(AppId) as AppIdValue[];
