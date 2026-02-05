@@ -32,7 +32,7 @@ export function loadConfig(): Config {
     databaseUrl: envOrDefault('DATABASE_URL', 'postgresql://ecs:password@localhost:5432/entitlements'),
     dbPoolSize: parseInt(envOrDefault('DB_POOL_SIZE', '2'), 10),
     redisUrl: envOrDefault('REDIS_URL', 'redis://localhost:6379'),
-    hssUrl: envOrDefault('HSS_URL', 'http://mock-hss:3001'),
+    hssUrl: envOrDefault('HSS_URL', 'http://localhost:3001'),
     authTokenTtlSeconds: parseInt(envOrDefault('AUTH_TOKEN_TTL_SECONDS', '86400'), 10),
     fastAuthTokenTtlSeconds: parseInt(envOrDefault('FAST_AUTH_TOKEN_TTL_SECONDS', '172800'), 10),
     tempTokenTtlSeconds: parseInt(envOrDefault('TEMP_TOKEN_TTL_SECONDS', '3600'), 10),
