@@ -1325,6 +1325,40 @@ GCP certificate names are immutable. If Terraform needs to recreate a self-manag
 
 **Takeaway:** Any GCP resource that's referenced by another resource (certs → proxies, NEGs → backends, addresses → forwarding rules) should use `create_before_destroy` if it might ever be recreated.
 
+#### 17. Module-Level `depends_on` Creates Invisible Dependency Bombs
+
+This one cost us a `terraform plan` failure with a wall of cyclic dependency errors. The load balancer module had:
+
+```hcl
+module "load_balancer" {
+  source = "./modules/load-balancer"
+  ...
+  depends_on = [
+    google_project_service.apis,
+    module.cloud_run,
+    module.cloud_armor,
+  ]
+}
+```
+
+The plan blew up with a cycle involving `google_compute_global_address` in the load balancer module and `google_compute_global_address` in the networking module (used for VPC peering). These two resources have nothing to do with each other — they just share a resource type.
+
+Here's why: module-level `depends_on` is a sledgehammer. When you write `depends_on = [module.cloud_run]`, Terraform doesn't just say "wait for Cloud Run to finish." It makes **every resource in the load balancer module** depend on **every resource in cloud_run**, which depends on **every resource in networking** (because cloud_run has its own `depends_on = [module.networking]`). This creates a transitive chain: every load balancer resource depends on every networking resource. Since both modules contain `google_compute_global_address` resources, Terraform sees a potential cycle and gives up.
+
+The fix: remove `depends_on` entirely. The variable references (`module.cloud_run.ecs_service_name`, `module.cloud_armor.policy_id`) already create precise, resource-level ordering. Terraform knows the load balancer's serverless NEG can't be created until the Cloud Run service name is known — it doesn't need a blanket "wait for everything."
+
+```hcl
+module "load_balancer" {
+  source = "./modules/load-balancer"
+  cloud_run_service_name = module.cloud_run.ecs_service_name  # implicit dependency
+  security_policy_id     = module.cloud_armor.policy_id       # implicit dependency
+  ...
+  # No depends_on needed — variable references handle ordering
+}
+```
+
+**Takeaway:** `depends_on` at the module level is almost always wrong. It creates O(n×m) dependency edges between every resource in both modules. Use variable references instead — they create precise, single-resource dependencies. Reserve `depends_on` for cases where there's a real hidden dependency that Terraform can't infer (like waiting for a VPC peering connection before creating a database that uses it).
+
 ### The Terraform Module
 
 ```
