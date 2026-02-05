@@ -1452,6 +1452,158 @@ The order matters: `eap_relay` is checked first because it could be either a re-
 
 **22. K_aut and K_encr persist across re-auths.** Only MSK and EMSK get re-derived on each re-auth (from the original MK + counter + nonce). The authentication and encryption keys are "session-level" — they last until the re-auth state expires or counter exhausts. This is per RFC 4187 Section 7.
 
+---
+
+## Phase 10: SQN Resynchronization — When Network and Device Disagree
+
+### The Problem: What Is SQN and Why Does It Drift?
+
+Remember how EAP-AKA works: the server sends a challenge with RAND and AUTN, and the device uses its SIM card to compute a response. But there's a subtle field inside AUTN called the **Sequence Number (SQN)** — a 48-bit counter that prevents replay attacks.
+
+The idea is simple: every time the network sends a challenge, it increments SQN. The SIM card keeps its own copy of SQN. When the SIM receives a challenge, it checks: "Is this SQN higher than my stored value?" If yes, it's a fresh challenge — proceed. If no, it might be a replay attack — reject it.
+
+But here's where reality gets messy. The SIM and the network can get **out of sync**:
+
+- The SIM roams to a different network that doesn't know the latest SQN
+- A server restarts and loses its SQN state
+- Network glitches cause challenges to arrive out of order
+- The SIM was cloned (legitimately, for testing) and both copies advance SQN independently
+
+When this happens, the SIM receives a challenge with an SQN that looks "stale" — lower than what it expects. The SIM can't just ignore this (what if the network legitimately needs to authenticate?), but it also can't accept a potentially replayed challenge. The answer is a **resynchronization** handshake.
+
+### The SYNC_FAILURE Dance
+
+When a device detects that the server's SQN is behind its own, it sends an `EAP-Response/AKA-Synchronization-Failure` containing a special value called **AUTS** (Authentication Synchronization). AUTS is 14 bytes that encode:
+
+1. The device's actual SQN (concealed with AK* so eavesdroppers can't learn it)
+2. A MAC (called MAC-S) proving the device really knows the secret key Ki
+
+The server forwards AUTS to the HSS, which:
+1. Decrypts the concealed SQN using f5* (a variant of the anonymity key function)
+2. Verifies MAC-S using f1* (a variant of the MAC function)
+3. If valid, updates its SQN to match the device's, plus a margin
+4. Generates fresh authentication vectors with the corrected SQN
+5. Returns new vectors to the server
+
+The server then issues a **new challenge** with the fresh vectors. The device, seeing a now-valid SQN, proceeds with normal authentication. From the device's perspective, it just took an extra round-trip. From the attacker's perspective, they can't force a resync because they can't produce a valid AUTS without knowing Ki.
+
+### The Star Functions: f5* and f1*
+
+The MILENAGE algorithm (3GPP TS 35.206) defines five main functions: f1 through f5. But for resynchronization, it defines two *variants*: f1* and f5*. These use different constants than their non-star counterparts:
+
+| Function | Purpose | Rotation Constant | XOR Constant (last byte) |
+|----------|---------|-------------------|--------------------------|
+| f1 | MAC-A (normal auth) | R1 = 64 | C1[15] = 0x00 |
+| f1* | MAC-S (resync) | R1* = 64 | C1*[15] = 0x80 |
+| f5 | AK (normal auth) | R5 = 96 | C5[15] = 0x08 |
+| f5* | AK* (resync) | R5* = 0 | C5*[15] = 0x10 |
+
+This is elegant: the same core AES operations, but tweaked constants ensure that AK ≠ AK* and MAC-A ≠ MAC-S. An attacker who captures normal authentication vectors can't use them to forge AUTS.
+
+### The Implementation
+
+The mock-hss now has four new functions in `milenage.ts`:
+
+```typescript
+// Compute AK* for de-concealing SQN from AUTS
+export function f5Star(ki: Buffer, rand: Buffer, op: Buffer): Buffer
+
+// Compute MAC-S for validating AUTS
+export function f1Star(ki: Buffer, rand: Buffer, sqn: Buffer, amf: Buffer, op: Buffer): Buffer
+
+// Validate AUTS and extract the device's SQN
+export function validateAuts(ki: Buffer, rand: Buffer, auts: Buffer, op: Buffer): AuTsValidationResult
+
+// Generate AUTS (for testing — simulates what a device would send)
+export function generateAuts(ki: Buffer, rand: Buffer, sqnMs: Buffer, op: Buffer): Buffer
+```
+
+And a new endpoint `POST /resync`:
+
+```typescript
+// Request
+{ imsi: string, rand: string /* base64 */, auts: string /* base64 */ }
+
+// Response (success)
+{ rand: string, autn: string, xres: string, ck: string, ik: string }
+
+// Response (failure)
+{ error: "AUTS validation failed" }
+```
+
+The ECS got a new `resyncVectors()` client function and the SYNC_FAILURE handler in `eapAka.ts` was upgraded from a stub to full implementation:
+
+1. Extract AT_AUTS from the SYNC_FAILURE packet
+2. Get the original RAND from the session
+3. Call `POST /resync` on the HSS
+4. If resync fails → delete session, return EAP-Failure
+5. If resync succeeds → derive new keys, update session, issue new challenge
+6. Return 401 with the new challenge (same session ID)
+
+### Lessons From SQN Resync
+
+**23. Star functions are NOT just "different values" — they're a security boundary.** At first glance, f1* looks like f1 with different constants. But those different constants are the entire point. If an attacker intercepts {RAND, AUTN, XRES} from a normal authentication, they learn AK (from AUTN) and MAC-A (from AUTN). But they can't compute AK* or MAC-S because those use different constants. The separation between "authentication vectors" and "resync vectors" is cryptographic, not just organizational.
+
+**24. The AUTS structure is information-dense.** 14 bytes encode: concealed-SQN (6 bytes) + MAC-S (8 bytes). The concealment is SQN ⊕ AK*, so you need both the subscriber key AND the original RAND to extract SQN. An eavesdropper who sees AUTS learns nothing about the actual SQN value. This is a beautiful example of "the minimum information necessary" — the server can verify and extract what it needs, but observers get nothing.
+
+**25. SQN increments on the HSS, not just locally.** After generating vectors in `/vectors`, we now increment the subscriber's SQN in the database. This prevents replay attacks: if an attacker captures a challenge and replays it later, the device will reject it (SQN too low). Before this fix, the server could accidentally issue the same SQN twice. In production, the HSS would typically increment by 32 (not 1) to leave room for multiple concurrent authentication attempts, but our POC uses a simpler increment-by-1 approach.
+
+**26. Session continuity across resync is tricky.** When SYNC_FAILURE happens, we don't want to throw away the session and start over — the client already has our session ID in the `X-EAP-Session-Id` header. Instead, we update the existing session with fresh vectors and keys, then return a new challenge on the same session ID. The client sends its next response to the same session, unaware that a resync happened under the hood. Getting this wrong (e.g., deleting the session and creating a new one) would confuse clients that expect session continuity.
+
+**27. Testing resync without a real SIM is hard.** A real SYNC_FAILURE happens when a SIM's SQN counter is ahead of the network's. We can't easily simulate that in integration tests — we'd need to somehow manipulate the SIM or mock it entirely. Our integration tests focus on the error paths: missing AT_AUTS, wrong-length AT_AUTS, invalid AUTS (wrong MAC-S). A full end-to-end resync test would require either a real SIM card or a complete MILENAGE implementation on the client side to generate valid AUTS values.
+
+**28. AMF is zero for resync, always.** When computing MAC-S via f1*, the AMF (Authentication Management Field) is always 0x0000. This is per the spec — the resync mechanism doesn't need the separation bit or other AMF features. In normal authentication, we use AMF = 0x8000 (separation bit set for LTE/5G). Getting this wrong produces invalid MAC-S values that the HSS rejects.
+
+### The Code Flow
+
+```
+Device                              ECS                         HSS
+  |                                  |                           |
+  | [RT1: Device sends IMSI]         |                           |
+  |--------------------------------->|                           |
+  |                                  |------ GET /vectors ------>|
+  |                                  |<----- vectors (SQN=100) --|
+  |<------- 401 + Challenge ---------|                           |
+  |   RAND, AUTN (SQN=100)           |                           |
+  |                                  |                           |
+  | [Device SIM has SQN=500]         |                           |
+  | [SQN=100 is "too old"!]          |                           |
+  | [SIM generates AUTS]             |                           |
+  |                                  |                           |
+  |------ SYNC_FAILURE + AUTS ------>|                           |
+  |                                  |------ POST /resync ------>|
+  |                                  |   IMSI, RAND, AUTS        |
+  |                                  |                           |
+  |                                  | [HSS validates AUTS]      |
+  |                                  | [Extracts SQN_MS=500]     |
+  |                                  | [Updates SQN to 532]      |
+  |                                  |                           |
+  |                                  |<--- fresh vectors (532) --|
+  |<------- 401 + New Challenge -----|                           |
+  |   RAND', AUTN' (SQN=532)         |                           |
+  |                                  |                           |
+  | [SQN=532 > 500 ✓]                |                           |
+  |-------- Normal Response -------->|                           |
+  |<------- 200 + Token -------------|                           |
+```
+
+### Files Changed
+
+```
+mock-hss/src/milenage.ts      — f5Star, f1Star, validateAuts, generateAuts
+mock-hss/src/index.ts         — POST /resync endpoint, SQN increment in /vectors
+mock-hss/tests/milenage.test.ts — 15 new tests for resync functions
+
+src/auth/eapAkaVectors.ts     — resyncVectors() client function
+src/auth/eapSession.ts        — updateSession() for updating session after resync
+src/auth/eapAka.ts            — Full SYNC_FAILURE handler implementation
+src/server/routes/entitlement.ts — Handle resync case (401 + sessionId)
+
+tests/integration/eapAka.integration.test.ts — 3 new resync error case tests
+```
+
+---
+
 ## What's Coming Next
 
 - **Phase 10: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
