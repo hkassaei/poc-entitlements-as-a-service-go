@@ -1604,10 +1604,144 @@ tests/integration/eapAka.integration.test.ts — 3 new resync error case tests
 
 ---
 
+## Phase 11: Dead Code Cleanup — The Archaeology of Design Pivots
+
+Sometimes the most valuable code review isn't about what's there — it's about what *shouldn't* be there anymore.
+
+### The Investigation That Started It All
+
+We received a concern about a "Token Rotation Race Condition":
+
+> "In entitlementRoutes.ts, tokens are rotated (old revoked, new issued) on every POST. If a mobile device retries a request due to a transient network failure after the server has processed the rotation, the retry will carry the 'old' (now revoked) token and fail with a 401."
+
+This sounded serious. Token rotation race conditions are real vulnerabilities in many authentication systems. So we investigated.
+
+### The Forensic Analysis
+
+Step 1: Search for `rotateToken` calls in production code.
+
+```bash
+grep -r "rotateToken(" src/
+# Result: Only the function definition in tokenService.ts
+```
+
+Step 2: Search for `revokeToken` calls in production code.
+
+```bash
+grep -r "revokeToken(" src/
+# Result: Only the function definition in tokenService.ts
+```
+
+**Finding: Neither function is ever called in production routes.** The concern was based on a misunderstanding — or perhaps an assumption about how the code *should* work based on the function names.
+
+### The Token Flow Reality
+
+Here's what actually happens in each authentication path:
+
+| Path | Description | Token Handling |
+|------|-------------|----------------|
+| Path 1 | EAP-AKA full auth | Issues re-auth identity (Redis), no DB token |
+| Path 2a | Re-auth with identity | Validates identity in Redis, issues new identity |
+| Path 2b | ODSA temporary token | `validateToken()` — **read-only**, no rotation |
+
+The `validateToken()` function only:
+1. Checks Redis cache
+2. Falls back to Postgres if needed
+3. Returns token info
+
+It does **not** revoke, rotate, or modify the token. The same ODSA token can be used for multiple requests until it naturally expires (TTL-based expiration).
+
+### The Dead Code Discovery
+
+So why do `rotateToken()` and `revokeToken()` exist if they're never called?
+
+**Design archaeology:** During Phase 4, the original design called for rotating opaque DB tokens on every authenticated POST. The functions were implemented and unit-tested. But then Phase 8 introduced EAP-AKA Fast Re-authentication (RFC 4187 §5.1), which replaced opaque tokens with cryptographic re-auth identities stored in Redis.
+
+The new design was better:
+- Re-auth identities are cryptographically tied to the MK (Master Key)
+- Counter-based replay protection built into the protocol
+- Idempotency cache handles network retries (90s TTL)
+
+But when the new code was wired in, **nobody deleted the old code**. The functions sat there, tested but unused, for weeks.
+
+### The Full Dead Code Audit
+
+We scanned the entire codebase for unused exports:
+
+| Dead Code | File | Why It Existed |
+|-----------|------|----------------|
+| `rotateToken()` | tokenService.ts | Phase 4 design, replaced by re-auth identities |
+| `revokeToken()` | tokenService.ts | Internal to `rotateToken()`, never needed |
+| `updateSessionState()` | eapSession.ts | Superseded by `updateSession()` (more comprehensive) |
+| `ALL_APP_ID_VALUES` | appIds.ts | Convenience constant, never referenced |
+
+All of these had unit tests. All of the unit tests passed. None of the code was actually used.
+
+### The Cleanup
+
+```bash
+# Before
+4 files changed, 22 insertions(+), 54 deletions(-)
+
+# Functions removed: rotateToken, revokeToken, updateSessionState
+# Constants removed: ALL_APP_ID_VALUES
+# Tests: Replaced revokeToken tests with generateToken/validateToken tests
+```
+
+### Lessons From Dead Code Cleanup
+
+**29. Dead code is a design history that nobody reads.** Those functions told a story: "We once planned to rotate tokens on every request." But without comments or documentation, that story was invisible. Future developers might wonder "why does this exist?" or worse, assume they should start using it.
+
+**30. Unit tests can lie.** All the dead code had passing tests. The tests proved the code *worked* — but not that it was *used*. Test coverage metrics can be misleading; 100% coverage of dead code is still 100% waste.
+
+**31. Design pivots leave debris.** When you replace one approach with another, you're usually focused on making the new approach work. Deleting the old approach feels like a separate task — one that often gets deprioritized. But unused code increases cognitive load, maintenance burden, and security surface area.
+
+**32. "Might need it later" is usually wrong.** The temptation to keep `revokeToken()` "in case we need it" is strong. But Git has history. If we ever need token revocation, we can resurrect the code from a commit hash. Keeping it in the codebase "just in case" means:
+- IDE autocomplete suggests it
+- Refactoring tools have to consider it
+- Security audits have to analyze it
+- New developers have to understand why it exists
+
+**33. Grep is your friend.** The entire investigation took 5 minutes:
+```bash
+grep -r "rotateToken\|revokeToken" src/  # Find all references
+grep -r "updateSessionState" src/        # Find all references
+# If only definition appears → dead code
+```
+
+Make this part of your code review checklist: "Is every new function actually called somewhere?"
+
+**34. The idempotency cache was the real hero.** The concern about retry failures was valid *in principle* — network retries with invalidated tokens would fail. But the implementation already handled this through the idempotency cache:
+
+```typescript
+// entitlement.ts:55-60
+const cached = await getCachedResponse(sessionId, body.eap_relay);
+if (cached) {
+  logger.info({ sessionId }, 'Returning cached EAP response');
+  return reply.code(HTTP_STATUS.OK).send(cached);
+}
+```
+
+Before processing any EAP response, we check if we've already processed this exact (sessionId + eapRelay) combination. If so, we return the cached response. The cache has a 90-second TTL — long enough for any reasonable retry strategy.
+
+This is defense in depth: even if token rotation *were* happening, retries would hit the cache and succeed.
+
+### The Irony
+
+The investigation started with a security concern that turned out to be unfounded. But it led to a cleanup that genuinely improved the codebase — removing 54 lines of code that:
+- Would have confused future developers
+- Required maintenance when dependencies changed
+- Expanded the "what could this do?" attack surface analysis
+- Made the codebase feel more complex than it actually was
+
+Sometimes the best outcome of a bug report is "there's no bug, but here's what we fixed anyway."
+
+---
+
 ## What's Coming Next
 
-- **Phase 10: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
-- **Phase 11: Testing & Hardening**: Load testing, error handling audit, logging completeness
+- **Phase 12: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
+- **Phase 13: Testing & Hardening**: Load testing, error handling audit, logging completeness
 
 ---
 
