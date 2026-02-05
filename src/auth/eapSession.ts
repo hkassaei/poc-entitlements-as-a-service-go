@@ -97,3 +97,39 @@ export async function updateSessionState(
 export async function deleteSession(sessionId: string): Promise<void> {
   await redis.del(sessionKey(sessionId));
 }
+
+/**
+ * Update session fields (used after SQN resync to store new vectors/keys).
+ * Resets the TTL to the full session timeout.
+ */
+export async function updateSession(
+  sessionId: string,
+  updates: {
+    rand?: Buffer;
+    xres?: Buffer;
+    ck?: Buffer;
+    ik?: Buffer;
+    identifier?: number;
+    kAut?: Buffer;
+    kEncr?: Buffer;
+    mk?: Buffer;
+  },
+): Promise<void> {
+  const key = sessionKey(sessionId);
+
+  const fields: Record<string, string> = {};
+
+  if (updates.rand) fields.rand = updates.rand.toString('base64');
+  if (updates.xres) fields.xres = updates.xres.toString('base64');
+  if (updates.ck) fields.ck = updates.ck.toString('base64');
+  if (updates.ik) fields.ik = updates.ik.toString('base64');
+  if (updates.identifier !== undefined) fields.identifier = String(updates.identifier);
+  if (updates.kAut) fields.kAut = updates.kAut.toString('base64');
+  if (updates.kEncr) fields.kEncr = updates.kEncr.toString('base64');
+  if (updates.mk) fields.mk = updates.mk.toString('base64');
+
+  if (Object.keys(fields).length > 0) {
+    await redis.hset(key, fields);
+    await redis.expire(key, EAP_AKA.SESSION_TTL_SECONDS);
+  }
+}

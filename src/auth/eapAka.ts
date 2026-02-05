@@ -22,8 +22,8 @@ import {
   type EapAttribute,
 } from './eapCodec.js';
 import { buildIdentity, deriveMasterKey, deriveKeys, computeMac, verifyMac } from './keyDerivation.js';
-import { fetchVectors, HssSubscriberNotFoundError } from './eapAkaVectors.js';
-import { createSession, getSession, deleteSession } from './eapSession.js';
+import { fetchVectors, resyncVectors, HssSubscriberNotFoundError } from './eapAkaVectors.js';
+import { createSession, getSession, deleteSession, updateSession } from './eapSession.js';
 import { findSubscriberByImsi } from './tokenService.js';
 import { generateReauthId, storeReauthState } from './reauthStore.js';
 
@@ -38,6 +38,7 @@ export interface AuthResult {
   token?: string;
   eapRelay?: string; // EAP-Success or EAP-Failure base64
   subscriberId?: string;
+  sessionId?: string; // Included when resync issues a new challenge
 }
 
 let identifierCounter = 0;
@@ -187,16 +188,90 @@ export async function handleEapResponse(
     };
   }
 
-  // Handle SYNC_FAILURE (AT_AUTS)
+  // Handle SYNC_FAILURE (AT_AUTS) — RFC 4187 §6.2
   if (packet.subtype === AKA_SUBTYPE.SYNC_FAILURE) {
-    logger.warn({ sessionId, imsi: session.imsi }, 'Client sent SYNC_FAILURE');
-    await deleteSession(sessionId);
+    logger.info({ sessionId, imsi: session.imsi }, 'Client sent SYNC_FAILURE, attempting resync');
+
+    // Extract AT_AUTS (14 bytes) from the packet
+    const atAuts = findAttribute(packet.attributes, AT.AT_AUTS);
+    if (!atAuts || atAuts.value.length !== 14) {
+      logger.warn({ sessionId, hasAuts: !!atAuts, autsLen: atAuts?.value.length }, 'SYNC_FAILURE missing or invalid AT_AUTS');
+      await deleteSession(sessionId);
+      return {
+        statusCode: 401,
+        eapRelay: encodeEapToBase64({
+          code: EAP_CODE.FAILURE,
+          identifier: parseInt(session.identifier, 10),
+        }),
+      };
+    }
+
+    // Get original RAND from session
+    const originalRand = Buffer.from(session.rand, 'base64');
+
+    // Request resync from HSS
+    const resyncResult = await resyncVectors(session.imsi, originalRand, atAuts.value);
+    if (!resyncResult.success || !resyncResult.vectors) {
+      logger.warn({ sessionId, imsi: session.imsi, error: resyncResult.error }, 'SQN resync failed');
+      await deleteSession(sessionId);
+      return {
+        statusCode: 401,
+        eapRelay: encodeEapToBase64({
+          code: EAP_CODE.FAILURE,
+          identifier: parseInt(session.identifier, 10),
+        }),
+      };
+    }
+
+    // Derive new keys from fresh vectors
+    const vectors = resyncResult.vectors;
+    const identity = buildIdentity(session.imsi);
+    const mk = deriveMasterKey(identity, vectors.ik, vectors.ck);
+    const keys = deriveKeys(identity, vectors.ik, vectors.ck);
+
+    // Increment identifier for the new challenge
+    const newIdentifier = nextIdentifier();
+
+    // Build new EAP-Request/AKA-Challenge with zeroed MAC
+    const zeroMac = Buffer.alloc(16);
+    const challengePacket: EapPacket = {
+      code: EAP_CODE.REQUEST,
+      identifier: newIdentifier,
+      type: EAP_TYPE_AKA,
+      subtype: AKA_SUBTYPE.CHALLENGE,
+      attributes: [
+        { type: AT.AT_RAND, value: vectors.rand },
+        { type: AT.AT_AUTN, value: vectors.autn },
+        { type: AT.AT_MAC, value: zeroMac },
+      ],
+    };
+
+    // Encode, compute MAC, patch it in
+    const packetBytes = encodeEapPacket(challengePacket);
+    const mac = computeMac(keys.kAut, packetBytes);
+    const macAttrOffset = findAtMacOffset(packetBytes);
+    mac.copy(packetBytes, macAttrOffset + 4);
+
+    const eapRelay = packetBytes.toString('base64');
+
+    // Update session with new vectors, keys, and identifier
+    await updateSession(sessionId, {
+      rand: vectors.rand,
+      xres: vectors.xres,
+      ck: vectors.ck,
+      ik: vectors.ik,
+      identifier: newIdentifier,
+      kAut: keys.kAut,
+      kEncr: keys.kEncr,
+      mk,
+    });
+
+    logger.info({ sessionId, imsi: session.imsi }, 'SQN resync successful, new challenge issued');
+
     return {
       statusCode: 401,
-      eapRelay: encodeEapToBase64({
-        code: EAP_CODE.FAILURE,
-        identifier: parseInt(session.identifier, 10),
-      }),
+      eapRelay,
+      sessionId, // Same session ID — keep the session for the next round
     };
   }
 

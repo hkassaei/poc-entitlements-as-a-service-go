@@ -176,6 +176,17 @@ export async function entitlementRoutes(app: FastifyInstance): Promise<void> {
           });
         }
 
+        // SQN resync: new challenge issued (same session ID)
+        if (result.statusCode === 401 && result.sessionId) {
+          return reply
+            .code(HTTP_STATUS.UNAUTHORIZED)
+            .header('X-EAP-Session-Id', result.sessionId)
+            .send({
+              eap_relay: result.eapRelay,
+              statusCode: HTTP_STATUS.UNAUTHORIZED,
+            });
+        }
+
         // Auth failed
         return reply.code(HTTP_STATUS.UNAUTHORIZED).send({
           error: 'Unauthorized',
