@@ -148,9 +148,7 @@ module "load_balancer" {
   security_policy_id     = module.cloud_armor.policy_id
   domain                 = var.domain
 
-  depends_on = [
-    google_project_service.apis,
-    module.cloud_run,
-    module.cloud_armor,
-  ]
+  # No explicit depends_on — variable references to cloud_run and cloud_armor
+  # outputs create implicit ordering. Module-level depends_on would cause a
+  # dependency cycle through the networking module's global address resources.
 }
