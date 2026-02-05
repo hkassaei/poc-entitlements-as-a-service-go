@@ -5,6 +5,7 @@ import { requestParser } from './middleware/requestParser.js';
 import { userAgentParser } from './middleware/userAgent.js';
 import { versionCheck } from './middleware/versionCheck.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { auditLogger } from './middleware/auditLogger.js';
 import { healthRoutes } from './routes/health.js';
 import { entitlementRoutes } from './routes/entitlement.js';
 import { pool } from '../db/index.js';
@@ -19,6 +20,9 @@ export async function buildApp() {
   app.addHook('onRequest', requestParser);
   app.addHook('onRequest', userAgentParser);
   app.addHook('onRequest', versionCheck);
+
+  // Audit logging (fires after response is sent)
+  app.addHook('onResponse', auditLogger);
 
   // Centralized error handler
   app.setErrorHandler(errorHandler);
