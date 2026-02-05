@@ -134,20 +134,6 @@ export async function revokeToken(tokenValue: string): Promise<void> {
 }
 
 /**
- * Rotate a token: revoke the old one and issue a new one.
- * Returns the new token info.
- */
-export async function rotateToken(
-  oldTokenValue: string,
-  subscriberId: string,
-  tokenType: string,
-  clientIp: string,
-): Promise<TokenInfo> {
-  await revokeToken(oldTokenValue);
-  return generateToken(subscriberId, tokenType, clientIp);
-}
-
-/**
  * Generate a temporary token for ODSA operations.
  * Stores scope and operation targets in both Postgres and Redis.
  */

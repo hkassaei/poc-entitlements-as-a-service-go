@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { generateToken, validateToken, revokeToken, rotateToken } from '../../src/auth/tokenService.js';
+import { generateToken, validateToken, revokeToken } from '../../src/auth/tokenService.js';
 import { db } from '../../src/db/index.js';
 import { redis } from '../../src/db/redis.js';
 import { tokens } from '../../src/db/schema.js';
@@ -96,57 +96,4 @@ describe('Token Service', () => {
     });
   });
 
-  describe('rotateToken', () => {
-    it('returns a new token different from the old one', async () => {
-      const oldToken = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
-      trackToken(oldToken.tokenValue);
-
-      const newToken = await rotateToken(
-        oldToken.tokenValue,
-        testSubscriberId,
-        TOKEN_TYPES.AUTH,
-        '127.0.0.1',
-      );
-      trackToken(newToken.tokenValue);
-
-      expect(newToken.tokenValue).not.toBe(oldToken.tokenValue);
-      expect(newToken.subscriberId).toBe(testSubscriberId);
-      expect(newToken.tokenType).toBe(TOKEN_TYPES.AUTH);
-    });
-
-    it('revokes the old token', async () => {
-      const oldToken = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
-      trackToken(oldToken.tokenValue);
-
-      const newToken = await rotateToken(
-        oldToken.tokenValue,
-        testSubscriberId,
-        TOKEN_TYPES.AUTH,
-        '127.0.0.1',
-      );
-      trackToken(newToken.tokenValue);
-
-      // Old token should be invalid
-      const oldResult = await validateToken(oldToken.tokenValue);
-      expect(oldResult).toBeNull();
-    });
-
-    it('makes the new token valid', async () => {
-      const oldToken = await generateToken(testSubscriberId, TOKEN_TYPES.AUTH, '127.0.0.1');
-      trackToken(oldToken.tokenValue);
-
-      const newToken = await rotateToken(
-        oldToken.tokenValue,
-        testSubscriberId,
-        TOKEN_TYPES.AUTH,
-        '127.0.0.1',
-      );
-      trackToken(newToken.tokenValue);
-
-      // New token should be valid
-      const newResult = await validateToken(newToken.tokenValue);
-      expect(newResult).not.toBeNull();
-      expect(newResult!.subscriberId).toBe(testSubscriberId);
-    });
-  });
 });
