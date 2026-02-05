@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 
@@ -29,7 +33,6 @@ resource "google_project_service" "apis" {
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
     "compute.googleapis.com",
-    "vpcaccess.googleapis.com",
     "servicenetworking.googleapis.com",
     "cloudtrace.googleapis.com",
   ])
@@ -51,14 +54,16 @@ module "iam" {
   project_id = var.project_id
 }
 
+# Module-level depends_on ensures VPC peering is fully established
+# before Cloud SQL tries to create a private-IP instance.
 module "database" {
-  source              = "./modules/database"
-  project_id          = var.project_id
-  region              = var.region
-  network_id          = module.networking.network_id
+  source                = "./modules/database"
+  project_id            = var.project_id
+  region                = var.region
+  network_id            = module.networking.network_id
   private_ip_range_name = module.networking.private_ip_range_name
-  tier                = var.db_tier
-  ha_enabled          = var.db_ha_enabled
+  tier                  = var.db_tier
+  ha_enabled            = var.db_ha_enabled
 
   depends_on = [google_project_service.apis, module.networking]
 }
@@ -73,10 +78,11 @@ module "redis" {
 }
 
 module "kms" {
-  source                   = "./modules/kms"
-  project_id               = var.project_id
-  region                   = var.region
-  mock_hss_service_account = module.iam.mock_hss_service_account_email
+  source                     = "./modules/kms"
+  project_id                 = var.project_id
+  region                     = var.region
+  mock_hss_service_account   = module.iam.mock_hss_service_account_email
+  cloud_build_service_account = module.iam.cloud_build_service_account_email
 
   depends_on = [google_project_service.apis]
 }
@@ -85,6 +91,7 @@ module "secrets" {
   source       = "./modules/secrets"
   project_id   = var.project_id
   region       = var.region
+  environment  = var.environment
   database_url = module.database.connection_url
   redis_url    = module.redis.connection_url
   ecs_service_account_email      = module.iam.ecs_service_account_email
@@ -105,7 +112,9 @@ module "cloud_run" {
   source                         = "./modules/cloud-run"
   project_id                     = var.project_id
   region                         = var.region
-  vpc_connector_id               = module.networking.vpc_connector_id
+  vpc_network                    = module.networking.network_name
+  vpc_subnetwork                 = module.networking.subnet_name
+  cloudsql_connection_name       = module.database.connection_name
   ecs_image                      = var.ecs_image
   mock_hss_image                 = var.mock_hss_image
   ecs_service_account_email      = module.iam.ecs_service_account_email
@@ -121,6 +130,7 @@ module "cloud_run" {
     module.secrets,
     module.iam,
     module.networking,
+    module.database,
   ]
 }
 
@@ -128,4 +138,19 @@ module "cloud_armor" {
   source = "./modules/cloud-armor"
 
   depends_on = [google_project_service.apis]
+}
+
+module "load_balancer" {
+  source                 = "./modules/load-balancer"
+  project_id             = var.project_id
+  region                 = var.region
+  cloud_run_service_name = module.cloud_run.ecs_service_name
+  security_policy_id     = module.cloud_armor.policy_id
+  domain                 = var.domain
+
+  depends_on = [
+    google_project_service.apis,
+    module.cloud_run,
+    module.cloud_armor,
+  ]
 }

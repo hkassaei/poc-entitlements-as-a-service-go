@@ -9,13 +9,23 @@ resource "google_cloud_run_v2_service" "mock_hss" {
     service_account = var.mock_hss_service_account_email
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = 1
       max_instance_count = 3
     }
 
     vpc_access {
-      connector = var.vpc_connector_id
-      egress    = "PRIVATE_RANGES_ONLY"
+      network_interfaces {
+        network    = var.vpc_network
+        subnetwork = var.vpc_subnetwork
+      }
+      egress = "PRIVATE_RANGES_ONLY"
+    }
+
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [var.cloudsql_connection_name]
+      }
     }
 
     containers {
@@ -28,8 +38,15 @@ resource "google_cloud_run_v2_service" "mock_hss" {
       resources {
         limits = {
           cpu    = "1"
-          memory = "512Mi"
+          memory = "1Gi"
         }
+        cpu_idle          = false
+        startup_cpu_boost = true
+      }
+
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
 
       env {
@@ -74,19 +91,29 @@ resource "google_cloud_run_v2_service" "ecs" {
   name     = "entitlement-server"
   location = var.region
   project  = var.project_id
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
 
   template {
     service_account = var.ecs_service_account_email
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = 1
       max_instance_count = 10
     }
 
     vpc_access {
-      connector = var.vpc_connector_id
-      egress    = "PRIVATE_RANGES_ONLY"
+      network_interfaces {
+        network    = var.vpc_network
+        subnetwork = var.vpc_subnetwork
+      }
+      egress = "PRIVATE_RANGES_ONLY"
+    }
+
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [var.cloudsql_connection_name]
+      }
     }
 
     containers {
@@ -99,8 +126,15 @@ resource "google_cloud_run_v2_service" "ecs" {
       resources {
         limits = {
           cpu    = "1"
-          memory = "512Mi"
+          memory = "1Gi"
         }
+        cpu_idle          = false
+        startup_cpu_boost = true
+      }
+
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
 
       env {
@@ -178,11 +212,12 @@ resource "google_cloud_run_v2_service" "ecs" {
   }
 }
 
-# Allow unauthenticated access to ECS (public API)
-resource "google_cloud_run_v2_service_iam_member" "ecs_public" {
+# Allow ECS service account to invoke mock-hss (internal service-to-service auth)
+resource "google_cloud_run_v2_service_iam_member" "ecs_invokes_mock_hss" {
   project  = var.project_id
   location = var.region
-  name     = google_cloud_run_v2_service.ecs.name
+  name     = google_cloud_run_v2_service.mock_hss.name
   role     = "roles/run.invoker"
-  member   = "allUsers"
+  member   = "serviceAccount:${var.ecs_service_account_email}"
 }
+

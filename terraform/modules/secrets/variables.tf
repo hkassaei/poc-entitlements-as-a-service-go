@@ -2,6 +2,11 @@ variable "project_id" {
   type = string
 }
 
+variable "environment" {
+  description = "Environment name used to namespace secret IDs (e.g. dev, staging, prod)"
+  type        = string
+}
+
 variable "region" {
   type = string
 }

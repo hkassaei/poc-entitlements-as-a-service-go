@@ -6,8 +6,14 @@ variable "region" {
   type = string
 }
 
-variable "vpc_connector_id" {
-  type = string
+variable "vpc_network" {
+  description = "VPC network name for Direct VPC Egress"
+  type        = string
+}
+
+variable "vpc_subnetwork" {
+  description = "VPC subnetwork name for Direct VPC Egress"
+  type        = string
 }
 
 variable "ecs_image" {
@@ -28,6 +34,11 @@ variable "mock_hss_service_account_email" {
 
 variable "database_url_secret_id" {
   type = string
+}
+
+variable "cloudsql_connection_name" {
+  description = "Cloud SQL instance connection name (project:region:instance) for Auth Proxy"
+  type        = string
 }
 
 variable "redis_url_secret_id" {

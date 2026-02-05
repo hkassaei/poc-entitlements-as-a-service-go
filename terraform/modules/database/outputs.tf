@@ -11,7 +11,7 @@ output "private_ip" {
 }
 
 output "connection_url" {
-  value     = "postgresql://ecs:${random_password.db_password.result}@${google_sql_database_instance.postgres.private_ip_address}:5432/entitlements"
+  value     = "postgresql://ecs:${random_password.db_password.result}@/entitlements?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
   sensitive = true
 }
 

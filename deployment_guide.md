@@ -15,11 +15,58 @@ You need a GCP project with billing enabled. This is the single most important p
 | **Terraform >= 1.5** | Provision all infrastructure (`terraform plan` / `terraform apply`) |
 | **Docker** | Build container images (for initial manual push before CI/CD is wired up) |
 
-## 3. GCP Authentication
+## 3. Prerequisite Roles
 
-Run `gcloud auth login` and `gcloud auth application-default login` so both `gcloud` and Terraform can authenticate. Your account needs **Owner** or **Editor** role on the project (to enable APIs, create service accounts, manage IAM, etc.).
+If your account doesn't have **Owner** or **Editor** on the project, you need these fine-grained roles. A project Owner must run these commands (replace `YOUR_PROJECT_ID` and `YOUR_EMAIL`):
 
-## 4. Information You Need to Decide
+```bash
+PROJECT_ID="YOUR_PROJECT_ID"
+USER="user:YOUR_EMAIL"
+
+# Artifact Registry — create Docker image repository
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/artifactregistry.admin" --condition=None
+
+# Cloud KMS — create keyring and crypto keys for Ki encryption
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/cloudkms.admin" --condition=None
+
+# VPC Access — create serverless VPC connector for Cloud Run
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/vpcaccess.admin" --condition=None
+
+# Secret Manager — store database and Redis credentials
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/secretmanager.admin" --condition=None
+
+# Cloud Run — deploy ECS and mock-hss services
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/run.admin" --condition=None
+
+# IAM — create service accounts (ecs-runner, mock-hss-runner, cloud-build)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/iam.serviceAccountAdmin" --condition=None
+
+# IAM — assign roles to service accounts
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/resourcemanager.projectIamAdmin" --condition=None
+
+# Service Networking — private IP allocation for Cloud SQL
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/servicenetworking.networksAdmin" --condition=None
+
+# Redis — create Memorystore instance
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="$USER" --role="roles/redis.admin" --condition=None
+```
+
+You also need `roles/cloudsql.admin` and `roles/compute.securityAdmin` (for Cloud Armor), but these are commonly pre-assigned in enterprise GCP projects.
+
+## 4. GCP Authentication
+
+Run `gcloud auth login` and `gcloud auth application-default login` so both `gcloud` and Terraform can authenticate.
+
+## 5. Information You Need to Decide
 
 | Variable | What it is | Default |
 |----------|-----------|---------|
@@ -29,13 +76,13 @@ Run `gcloud auth login` and `gcloud auth application-default login` so both `gcl
 | `db_ha_enabled` | High-availability for the DB | `false` (unnecessary for POC) |
 | `operator_mcc` / `operator_mnc` / `operator_name` | Operator identity in responses | `001` / `01` / `TestOperator` |
 
-## 5. GCP APIs That Terraform Enables Automatically
+## 6. GCP APIs That Terraform Enables Automatically
 
 The `main.tf` already enables these via `google_project_service`, so you don't need to do it manually:
 
 - Cloud Run, Cloud SQL Admin, Memorystore Redis, Cloud KMS, Secret Manager, Artifact Registry, Cloud Build, Compute Engine, VPC Access, Service Networking, Cloud Trace
 
-## 6. GitHub Connection (for CI/CD)
+## 7. GitHub Connection (for CI/CD)
 
 The `cloudbuild.yaml` pipeline triggers on push to `main`. To set this up you need to:
 
@@ -44,7 +91,7 @@ The `cloudbuild.yaml` pipeline triggers on push to `main`. To set this up you ne
 
 This is optional for the initial deployment — you can do the first deploy manually and wire up CI/CD after.
 
-## 7. Deployment Order
+## 8. Deployment Order
 
 Once you have a project and tools:
 
@@ -78,7 +125,7 @@ npx tsx src/db/seed-entitlements.ts
 curl https://<ecs-cloud-run-url>/health
 ```
 
-## 8. Estimated GCP Cost (POC)
+## 9. Estimated GCP Cost (POC)
 
 For a staging/POC setup with `db-f1-micro`, basic Redis, and `minInstances: 0`:
 

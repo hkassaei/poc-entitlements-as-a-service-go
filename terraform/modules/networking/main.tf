@@ -14,12 +14,16 @@ resource "google_compute_subnetwork" "subnet" {
   private_ip_google_access = true
 }
 
-# Private services access for Cloud SQL private IP
+# Private Services Access for Cloud SQL / Redis private IPs.
+# Explicitly pinned to 10.64.0.0/16 to avoid collision with the
+# subnet (10.0.0.0/20). Without an explicit address, Google's
+# auto-allocator often picks 10.0.0.0/16 which overlaps the subnet.
 resource "google_compute_global_address" "private_ip_range" {
   name          = "entitlements-private-ip"
   project       = var.project_id
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
+  address       = "10.64.0.0"
   prefix_length = 16
   network       = google_compute_network.vpc.id
 }
@@ -29,18 +33,6 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_ip_range.name]
 }
-
-# Serverless VPC connector for Cloud Run
-resource "google_vpc_access_connector" "connector" {
-  name          = "entitlements-connector"
-  project       = var.project_id
-  region        = var.region
-  network       = google_compute_network.vpc.name
-  ip_cidr_range = "10.8.0.0/28"
-  min_instances = 2
-  max_instances = 3
-}
-
 # Firewall: allow internal traffic
 resource "google_compute_firewall" "allow_internal" {
   name    = "entitlements-allow-internal"
@@ -61,5 +53,9 @@ resource "google_compute_firewall" "allow_internal" {
     protocol = "icmp"
   }
 
-  source_ranges = ["10.0.0.0/8"]
+  # Only trust traffic from our own ranges, not all of 10.0.0.0/8
+  source_ranges = [
+    "10.0.0.0/20",   # entitlements-subnet (Cloud Run, etc.)
+    "10.64.0.0/16",  # PSA range (Cloud SQL, Redis)
+  ]
 }

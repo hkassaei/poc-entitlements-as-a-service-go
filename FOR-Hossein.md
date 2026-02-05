@@ -879,6 +879,171 @@ The ECS cannot decrypt subscriber keys. The mock HSS cannot deploy new versions.
 
 **Takeaway:** Least-privilege isn't just a security checkbox. It's a design constraint that makes your system's trust boundaries explicit.
 
+### Hardening the Cloud Run Module: 9 Lessons That Would Have Bitten Us in Production
+
+After the initial Terraform was written, we did a hardening pass on the Cloud Run module. Every fix below addresses something that would have caused a real production incident — not a theoretical one.
+
+#### 5. VPC Connectors Are Legacy — Use Direct VPC Egress
+
+The original Terraform used a `google_vpc_access_connector` — a legacy approach that spins up hidden `e2-micro` proxy VMs between Cloud Run and the VPC. These add latency on every call to Postgres, Redis, and mock-hss, have throughput limits, and cost extra.
+
+The fix: replace `vpc_access.connector` with `vpc_access.network_interfaces`, which places Cloud Run instances directly on the VPC subnet. No proxy, no extra VMs, no throughput bottleneck.
+
+```hcl
+# BEFORE (legacy — proxy VMs in the path)
+vpc_access {
+  connector = var.vpc_connector_id
+  egress    = "PRIVATE_RANGES_ONLY"
+}
+
+# AFTER (direct — instances sit on the subnet)
+vpc_access {
+  network_interfaces {
+    network    = var.vpc_network
+    subnetwork = var.vpc_subnetwork
+  }
+  egress = "PRIVATE_RANGES_ONLY"
+}
+```
+
+**Takeaway:** When GCP offers two ways to do something and one involves extra infrastructure, check if there's a newer, simpler approach. VPC Connectors were the only option before Direct VPC Egress existed — they're not wrong, just outdated.
+
+#### 6. Cloud SQL Auth Proxy Needs an Explicit Volume Mount
+
+Passing a `DATABASE_URL` with a private IP doesn't give you encrypted, authenticated connections to Cloud SQL. The Cloud SQL Auth Proxy handles mTLS and IAM authentication automatically — but only if you tell Cloud Run to start it.
+
+The fix: add a `volumes` block with `cloud_sql_instance`, mount it at `/cloudsql/`, and change the `DATABASE_URL` to use the Unix socket path:
+
+```hcl
+# In the Cloud Run template
+volumes {
+  name = "cloudsql"
+  cloud_sql_instance {
+    instances = [var.cloudsql_connection_name]  # "project:region:instance"
+  }
+}
+
+# In the container
+volume_mounts {
+  name       = "cloudsql"
+  mount_path = "/cloudsql"
+}
+```
+
+And the `DATABASE_URL` changes from:
+```
+postgresql://ecs:pass@10.0.0.5:5432/entitlements
+```
+to:
+```
+postgresql://ecs:pass@/entitlements?host=/cloudsql/project:region:instance
+```
+
+**Takeaway:** Cloud Run's Cloud SQL integration isn't automatic. You need three things working together: the volume declaration, the mount point, and a socket-based connection string. Miss any one and your app either can't connect or connects insecurely.
+
+#### 7. `min_instance_count = 0` Is a Production Incident Waiting to Happen
+
+The default scale-to-zero sounds great for cost savings, but EAP-AKA is a multi-round-trip protocol with chained dependencies. A fully cold request stacks up:
+
+```
+ECS cold start (container boot + Node.js init)    ~1-3s
+  → Redis connection establishment                 ~100ms
+  → Call mock-hss (also cold):
+      mock-hss cold start                          ~1-3s
+        → Postgres connection                      ~200ms
+        → KMS API call                             ~100ms
+───────────────────────────────────────────────────
+Worst case total:                                  ~5-10s
+```
+
+Add mobile network latency and the device's HTTP timeout (often 30s) becomes reachable. Setting `min_instance_count = 1` on both services keeps at least one warm container always ready. The cost difference is minimal — idle instances are billed at a reduced CPU rate.
+
+**Takeaway:** For anything latency-sensitive with chained service dependencies, scale-from-one, not scale-from-zero. The cost of one idle container is trivial compared to the cost of timing out real users.
+
+#### 8. 512Mi Is a Ticking Time Bomb for Node.js
+
+512MiB sounds like a lot until you add up: V8 engine, Fastify with compiled TypeBox schemas, Postgres connection pool, Redis client, OpenTelemetry instrumentation, and the actual application. Under burst traffic, V8's garbage collector needs headroom — without it, GC pauses spike (freezing all request handling) or the container OOM-crashes.
+
+We bumped to 1Gi. Node.js defaults its heap limit to ~75% of available memory, giving ~768MB heap — enough for normal operation plus GC overhead.
+
+**Takeaway:** Memory limits aren't about average usage — they're about peak usage during garbage collection. If your limit is close to your steady-state usage, GC will eventually push you over.
+
+#### 9. CPU Throttling Silently Kills Connection Pools
+
+This is the sneakiest gotcha. Cloud Run defaults to throttling CPU to zero between requests. That means:
+
+1. A request completes, CPU drops to zero
+2. Postgres and Redis connection pools can't send keep-alive packets
+3. The server/firewall closes idle connections after ~30s
+4. Next request arrives, pool tries to use dead connections → errors
+5. Pool reconnects (adding latency), or the request fails entirely
+
+The fix is `cpu_idle = false` in the container's `resources` block. But here's the meta-lesson...
+
+#### 10. Use Native Terraform Fields, Not Annotations
+
+Our first attempt used the `run.googleapis.com/cpu-throttling` annotation:
+
+```hcl
+# WRONG — Terraform may silently ignore this
+annotations = {
+  "run.googleapis.com/cpu-throttling" = "false"
+}
+```
+
+This works in YAML manifests deployed via `gcloud`, but in Terraform's `google_cloud_run_v2_service` resource, there's a native `cpu_idle` field. When both exist, Terraform uses the native field and may ignore the annotation — meaning your annotation looks correct but has no effect.
+
+```hcl
+# RIGHT — native Terraform field, guaranteed to apply
+resources {
+  limits = {
+    cpu    = "1"
+    memory = "1Gi"
+  }
+  cpu_idle          = false  # Keep CPU allocated between requests
+  startup_cpu_boost = true   # Extra CPU during cold start
+}
+```
+
+**Takeaway:** Always check if the Terraform provider has a native field before using annotations. Annotations are a pass-through escape hatch — native fields are validated, documented, and won't be silently ignored.
+
+#### 11. Internal Services Still Need Explicit Invoker Permissions
+
+We had mock-hss set to `INGRESS_TRAFFIC_INTERNAL_ONLY` and assumed that meant any service in the same project could call it. Wrong. Cloud Run enforces IAM on every request, including internal service-to-service calls. Without `roles/run.invoker` on mock-hss granted to the ECS service account, every call returns 403.
+
+```hcl
+resource "google_cloud_run_v2_service_iam_member" "ecs_invokes_mock_hss" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.mock_hss.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${var.ecs_service_account_email}"
+}
+```
+
+**Takeaway:** "Internal only" in Cloud Run means "only reachable from the VPC" — it doesn't mean "open to everything inside." IAM is always enforced. This is actually a feature: even if an attacker gets into your VPC, they can't call internal services without the right service account.
+
+#### 12. Service Accounts Need Logging and Monitoring Roles
+
+The initial IAM config had Cloud SQL and Cloud Trace roles but forgot `logging.logWriter` and `monitoring.metricWriter`. Without these:
+- Pino's structured JSON logs would silently fail to appear in Cloud Logging
+- OpenTelemetry metrics would fail to export to Cloud Monitoring
+
+Both are **silent failures** — the application runs fine, but you're flying blind. You'd only discover it when you need the logs to debug a production issue and they're not there.
+
+**Takeaway:** Always include observability roles (`logging.logWriter`, `monitoring.metricWriter`, `cloudtrace.agent`) in your service account setup. Test that logs and metrics actually appear — don't just assume.
+
+#### 13. Enterprise GCP Org Policies Fight You at Every Turn
+
+When we tried to grant IAM roles to deploy, we hit two enterprise-specific issues:
+
+1. **`user:` bindings are blocked** — the org policy requires `group:` bindings. You can't grant roles to individual users; everything must go through Google Groups.
+2. **Conditional IAM policies require `--condition=None`** — if the project already has any conditional IAM bindings, every new binding command requires you to explicitly specify `--condition=None` (even for unconditional bindings).
+
+Neither error message is obvious. The first says "disallowed member type" (no hint about groups). The second says "specifying a condition is required" (sounds like you need a condition, when actually you need to explicitly say "no condition").
+
+**Takeaway:** Enterprise GCP is a different beast from personal GCP. Org policies, conditional IAM, and group-only bindings are the norm. Always test your IAM commands early in the deployment process — don't save them for last.
+
 ---
 
 ## The Full Architecture (After Phase 8)
@@ -909,9 +1074,9 @@ mock-hss/src/
 ├── index.ts                          # Key manager selection via createKeyManager()
 └── ...
 
-terraform/                            # 9 modules: networking, database, redis, kms,
+terraform/                            # 10 modules: networking, database, redis, kms,
 │                                     # secrets, artifact-registry, cloud-run,
-│                                     # cloud-armor, iam
+│                                     # cloud-armor, iam, load-balancer
 cloudbuild.yaml                       # 13-step CI/CD pipeline
 ```
 
@@ -1057,14 +1222,123 @@ Memorystore         → Redis 7 instance (1GB, BASIC tier, VPC-connected)
 KMS                 → Keyring "entitlement-keys" + CryptoKey "ki-kek" (90-day rotation)
 Secret Manager      → database-url + redis-url secrets (auto-populated from other modules)
 Artifact Registry   → Docker repo "entitlements" (cleanup policy: keep last 10 images)
-Cloud Run (ECS)     → Public service, port 8080, VPC connector, secrets injected
-Cloud Run (mock-hss)→ Internal-only service, port 3001, VPC connector, KMS access
-Cloud Armor         → WAF policy: rate limit (100 req/s/IP), SQLi + XSS protection
+Cloud Run (ECS)     → Internal+GCLB ingress, port 8080, Direct VPC Egress, secrets injected
+Cloud Run (mock-hss)→ Internal-only service, port 3001, Direct VPC Egress, KMS access
+Cloud Armor         → WAF policy: rate limit (2000 req/5min/IP), SQLi + XSS protection
+Load Balancer       → Global External ALB, static IP, serverless NEG, SSL termination,
+                      HTTP→HTTPS redirect, Cloud Armor attached
 IAM                 → 3 service accounts: ecs-runner, mock-hss-runner, cloud-build-deployer
 GCP APIs            → 11 APIs enabled (Cloud Run, SQL, Redis, KMS, etc.)
 ```
 
 The dependency graph flows bottom-up: networking first, then database/redis, then KMS/secrets, then Cloud Run services on top. Terraform figures out the order automatically from module references.
+
+---
+
+## Phase 8b: External Application Load Balancer — The Front Door
+
+### Why an ALB?
+
+Up until now, Cloud Run's ECS service was directly exposed to the internet with `INGRESS_TRAFFIC_ALL` and an `allUsers` IAM binding. That works, but it means Cloud Armor's WAF rules can't actually do much — they need a Google Load Balancer in front to intercept and filter traffic. It's like having a bouncer on your payroll but letting people walk in through the back door.
+
+The fix: put a **Global External Application Load Balancer** in front of Cloud Run, then lock down Cloud Run to only accept traffic from the load balancer.
+
+### The Architecture After the ALB
+
+```
+Internet → Static IP:443 → HTTPS Proxy (TLS termination)
+                              → URL Map → Backend Service (Cloud Armor attached)
+                                            → Serverless NEG → Cloud Run ECS
+                                                                (internal + GCLB only)
+
+Internet → Static IP:80  → HTTP Proxy → 301 Redirect → :443
+```
+
+Every request from the internet hits the ALB first. The ALB terminates TLS, applies Cloud Armor WAF rules (rate limiting, SQLi/XSS blocking), and then forwards clean traffic to Cloud Run over Google's internal network. Cloud Run rejects anything that doesn't come through the ALB.
+
+### Two Layers of Lockdown
+
+We didn't just change the ingress setting — we removed two things:
+
+1. **`INGRESS_TRAFFIC_ALL` → `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`** — Cloud Run now rejects requests that don't come from within the VPC or from Google's load balancer infrastructure. Someone curling the Cloud Run URL directly gets blocked at the network level.
+
+2. **Removed the `allUsers` IAM binding** — Even if someone bypassed the ingress filter, they'd need IAM authorization to invoke the service. Without `allUsers`, unauthenticated requests get a 403.
+
+Two independent layers. An attacker would need to defeat both to reach the service directly.
+
+### The SSL Certificate Problem (And a Dev-Friendly Solution)
+
+A load balancer that terminates TLS needs a certificate. For production with a real domain, Google manages the cert automatically — provisioning, renewal, the works. But what about dev/staging without a domain, where you're hitting a raw IP address?
+
+A Google-managed cert requires a domain for DNS validation. No domain means no cert. And an HTTPS proxy with an empty `ssl_certificates` list simply doesn't work — it won't serve TLS at all. Port 443 becomes a black hole.
+
+The solution: when no domain is configured, Terraform generates a **self-signed certificate** using the `tls` provider:
+
+```hcl
+resource "tls_private_key" "self_signed" {
+  count     = var.domain == null ? 1 : 0
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+resource "tls_self_signed_cert" "self_signed" {
+  count           = var.domain == null ? 1 : 0
+  private_key_pem = tls_private_key.self_signed[0].private_key_pem
+  validity_period_hours = 8760  # 1 year
+
+  subject {
+    common_name  = "entitlement-server.dev.internal"
+    organization = "Development"
+  }
+
+  allowed_uses = ["key_encipherment", "digital_signature", "server_auth"]
+}
+```
+
+Browsers will warn about the untrusted cert, but `curl -k` and development tools work fine. When you're ready for production, set `domain = "ecs.yourcarrier.com"` and Terraform swaps to a Google-managed cert automatically.
+
+The `create_before_destroy` lifecycle on the self-managed cert is important — GCP cert names are immutable, so rotation requires creating the new cert, attaching it to the proxy, and then deleting the old one. Without this lifecycle rule, Terraform tries to delete first and fails because the cert is still in use.
+
+### The HTTP→HTTPS Redirect
+
+Port 80 gets its own forwarding rule, URL map, and HTTP proxy — but instead of routing to a backend, it returns a `301 Moved Permanently` redirect to the HTTPS URL. This is standard practice: never serve real traffic over HTTP, but don't let port 80 be a dead end either.
+
+### The `EXTERNAL_MANAGED` Scheme
+
+All forwarding rules and the backend service use `load_balancing_scheme = "EXTERNAL_MANAGED"` instead of the older `EXTERNAL`. The "managed" variant is Google's modern ALB implementation — it supports Cloud Armor integration, advanced traffic management, and is the only option that works with serverless NEGs. Using plain `EXTERNAL` with a serverless NEG silently produces a broken configuration.
+
+### Lessons From the ALB
+
+#### 14. GCP's Terraform Provider Has Its Own Vocabulary
+
+The GCP Console and `gcloud` CLI call it `INTERNAL_AND_GCLB`. The Terraform provider calls it `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`. They mean the same thing, but if you copy the value from GCP docs into your Terraform config, `terraform validate` rejects it. This is a recurring pattern: **the Terraform provider's enum values often don't match the GCP documentation or Console UI.** Always check `terraform validate` early, and when something fails, look at the provider source code or error message for the correct enum.
+
+#### 15. An HTTPS Proxy Without a Certificate Is a Silent Failure
+
+There's no Terraform validation error for an HTTPS proxy with `ssl_certificates = []`. It provisions successfully. But port 443 simply doesn't work — connections hang or reset. The error only surfaces when you try to actually use the load balancer and wonder why nothing responds.
+
+**Takeaway:** When a resource "works" in Terraform but doesn't function at runtime, check for empty lists or null references in its configuration. Terraform validates syntax, not semantics.
+
+#### 16. Self-Signed Certs Need `create_before_destroy`
+
+GCP certificate names are immutable. If Terraform needs to recreate a self-managed cert (e.g., the private key changed, or you renamed it), the default behavior is delete-then-create. But you can't delete a cert that's attached to a live HTTPS proxy — GCP returns an error. `create_before_destroy = true` + `name_prefix` (instead of a static `name`) solves this: Terraform creates the new cert with a unique suffix, re-points the proxy, then deletes the old one.
+
+**Takeaway:** Any GCP resource that's referenced by another resource (certs → proxies, NEGs → backends, addresses → forwarding rules) should use `create_before_destroy` if it might ever be recreated.
+
+### The Terraform Module
+
+```
+terraform/modules/load-balancer/
+├── main.tf           # 10 resources: static IP, serverless NEG, backend service,
+│                     # URL map, SSL cert (managed or self-signed), HTTPS proxy,
+│                     # HTTPS forwarding rule, HTTP redirect URL map, HTTP proxy,
+│                     # HTTP redirect forwarding rule
+├── variables.tf      # project_id, region, cloud_run_service_name,
+│                     # security_policy_id, domain (optional)
+└── outputs.tf        # external_ip, https_url
+```
+
+The module is wired in `terraform/main.tf` and depends on both `cloud_run` (for the service name) and `cloud_armor` (for the WAF policy ID).
 
 ---
 

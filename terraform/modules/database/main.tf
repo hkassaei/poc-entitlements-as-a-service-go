@@ -3,11 +3,19 @@ resource "random_password" "db_password" {
   special = false
 }
 
+# Cloud SQL reserves instance names for ~1 week after deletion.
+# The random suffix ensures a fresh name on every terraform apply cycle,
+# avoiding "instance name already in use" errors after destroy+recreate.
+resource "random_id" "db_suffix" {
+  byte_length = 4
+}
+
 resource "google_sql_database_instance" "postgres" {
-  name             = "entitlements-db"
+  name             = "entitlements-db-${random_id.db_suffix.hex}"
   project          = var.project_id
   region           = var.region
   database_version = "POSTGRES_16"
+
 
   settings {
     tier              = var.tier

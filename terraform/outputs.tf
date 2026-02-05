@@ -32,3 +32,13 @@ output "mock_hss_service_account" {
   description = "Mock HSS Cloud Run service account"
   value       = module.iam.mock_hss_service_account_email
 }
+
+output "load_balancer_ip" {
+  description = "External IP address of the Application Load Balancer"
+  value       = module.load_balancer.external_ip
+}
+
+output "load_balancer_url" {
+  description = "Public HTTPS URL via the load balancer"
+  value       = module.load_balancer.https_url
+}

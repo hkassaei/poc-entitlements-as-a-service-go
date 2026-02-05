@@ -1,8 +1,3 @@
-resource "random_password" "redis_password" {
-  length  = 32
-  special = false
-}
-
 resource "google_redis_instance" "cache" {
   name               = "entitlements-redis"
   project            = var.project_id

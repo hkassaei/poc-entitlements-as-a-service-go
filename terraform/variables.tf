@@ -3,6 +3,12 @@ variable "project_id" {
   type        = string
 }
 
+variable "environment" {
+  description = "Environment name (e.g. dev, staging, prod) — used to namespace shared resources like secrets"
+  type        = string
+  default     = "dev"
+}
+
 variable "region" {
   description = "GCP region"
   type        = string
@@ -49,4 +55,10 @@ variable "operator_name" {
   description = "Operator display name"
   type        = string
   default     = "TestOperator"
+}
+
+variable "domain" {
+  description = "Domain name for Google-managed SSL certificate (omit for IP-only access)"
+  type        = string
+  default     = null
 }
