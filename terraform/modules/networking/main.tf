@@ -55,7 +55,7 @@ resource "google_compute_firewall" "allow_internal" {
 
   # Only trust traffic from our own ranges, not all of 10.0.0.0/8
   source_ranges = [
-    "10.0.0.0/20",   # entitlements-subnet (Cloud Run, etc.)
-    "10.64.0.0/16",  # PSA range (Cloud SQL, Redis)
+    "10.0.0.0/20",  # entitlements-subnet (Cloud Run, etc.)
+    "10.64.0.0/16", # PSA range (Cloud SQL, Redis)
   ]
 }

@@ -1,0 +1,48 @@
+version: 2
+
+updates:
+  # ECS npm dependencies
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Mock-HSS npm dependencies
+  - package-ecosystem: npm
+    directory: /mock-hss
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Terraform provider versions
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels:
+      - infrastructure
+
+  # GitHub Actions versions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels:
+      - ci

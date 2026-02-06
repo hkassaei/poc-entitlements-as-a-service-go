@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
+import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import { logger } from '../config/logger.js';
 import { requestParser } from './middleware/requestParser.js';
 import { userAgentParser } from './middleware/userAgent.js';

@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { Type } from '@sinclair/typebox';
-import { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
+import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import { eq } from 'drizzle-orm';
 import { config } from './config.js';
 import { db, pool, subscribers } from './db.js';

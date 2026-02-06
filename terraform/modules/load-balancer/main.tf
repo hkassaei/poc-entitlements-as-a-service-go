@@ -104,7 +104,7 @@ resource "google_compute_target_https_proxy" "default" {
 
   ssl_certificates = var.domain != null ? [
     google_compute_managed_ssl_certificate.default[0].id
-  ] : [
+    ] : [
     google_compute_ssl_certificate.self_signed[0].id
   ]
 }

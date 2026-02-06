@@ -86,22 +86,22 @@ module "redis" {
 }
 
 module "kms" {
-  source                     = "./modules/kms"
-  project_id                 = var.project_id
-  region                     = var.region
-  mock_hss_service_account   = module.iam.mock_hss_service_account_email
+  source                      = "./modules/kms"
+  project_id                  = var.project_id
+  region                      = var.region
+  mock_hss_service_account    = module.iam.mock_hss_service_account_email
   cloud_build_service_account = module.iam.cloud_build_service_account_email
 
   depends_on = [google_project_service.apis]
 }
 
 module "secrets" {
-  source       = "./modules/secrets"
-  project_id   = var.project_id
-  region       = var.region
-  environment  = var.environment
-  database_url = module.database.connection_url
-  redis_url    = module.redis.connection_url
+  source                         = "./modules/secrets"
+  project_id                     = var.project_id
+  region                         = var.region
+  environment                    = var.environment
+  database_url                   = module.database.connection_url
+  redis_url                      = module.redis.connection_url
   ecs_service_account_email      = module.iam.ecs_service_account_email
   mock_hss_service_account_email = module.iam.mock_hss_service_account_email
 

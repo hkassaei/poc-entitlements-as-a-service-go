@@ -21,7 +21,7 @@ import {
   AT,
   type EapPacket,
 } from '../../src/auth/eapCodec.js';
-import { buildIdentity, deriveKeys, computeMac } from '../../src/auth/keyDerivation.js';
+import { computeMac } from '../../src/auth/keyDerivation.js';
 import { encryptAttributes, decryptAttributes } from '../../src/auth/eapEncryption.js';
 import { generateReauthId, storeReauthState, getReauthState } from '../../src/auth/reauthStore.js';
 import { findSubscriberByImsi } from '../../src/auth/tokenService.js';
@@ -30,7 +30,7 @@ import { findSubscriberByImsi } from '../../src/auth/tokenService.js';
 const TEST_IMSI = '001010000000001';
 
 // We need the app for HTTP testing
-let app: Awaited<ReturnType<typeof import('../../src/server/app.js').buildApp>>;
+let app: Awaited<ReturnType<(typeof import('../../src/server/app.js'))['buildApp']>>;
 
 const BASE_BODY = {
   app: 'ap2004' as const,
@@ -466,45 +466,6 @@ describe('EAP-AKA Integration', () => {
       return encodeEapPacket(syncFailurePacket).toString('base64');
     }
 
-    /**
-     * Build an EAP-Response/AKA-Challenge packet (client response to challenge).
-     * Simulates a successful client response after resync.
-     */
-    function buildChallengeResponse(
-      challengeBase64: string,
-      xres: Buffer,
-      kAut: Buffer,
-    ): string {
-      const challengeBytes = Buffer.from(challengeBase64, 'base64');
-      const challenge = decodeEapPacket(challengeBytes);
-
-      // Build client response with AT_RES and zeroed MAC
-      const responsePacket: EapPacket = {
-        code: EAP_CODE.RESPONSE,
-        identifier: challenge.identifier,
-        type: EAP_TYPE_AKA,
-        subtype: AKA_SUBTYPE.CHALLENGE,
-        attributes: [
-          { type: AT.AT_RES, value: xres },
-          { type: AT.AT_MAC, value: Buffer.alloc(16) },
-        ],
-      };
-
-      const responseBytes = encodeEapPacket(responsePacket);
-
-      // Find MAC offset and compute real MAC
-      let macOffset = 8;
-      while (macOffset + 2 <= responseBytes.length) {
-        if (responseBytes.readUInt8(macOffset) === AT.AT_MAC) break;
-        macOffset += responseBytes.readUInt8(macOffset + 1) * 4;
-      }
-
-      const mac = computeMac(kAut, responseBytes);
-      mac.copy(responseBytes, macOffset + 4);
-
-      return responseBytes.toString('base64');
-    }
-
     it('SYNC_FAILURE → new challenge → successful auth', async () => {
       // This test simulates:
       // 1. Initial challenge (RT1)
@@ -530,9 +491,6 @@ describe('EAP-AKA Integration', () => {
       const challengeBytes = Buffer.from(rt1.json().eap_relay, 'base64');
       const challenge = decodeEapPacket(challengeBytes);
       expect(challenge.subtype).toBe(AKA_SUBTYPE.CHALLENGE);
-
-      // Extract RAND from challenge for AUTS generation
-      const atRand = challenge.attributes!.find((a) => a.type === AT.AT_RAND)!;
 
       // To properly test this, we need access to the subscriber's Ki/OP.
       // In a real scenario, the device has the Ki and generates AUTS.

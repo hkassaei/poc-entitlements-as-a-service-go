@@ -17,7 +17,7 @@ resource "google_artifact_registry_repository" "docker" {
   # -----------------------------------------------------------
   # 2. FIX: Effective Cleanup Policy (Delete + Keep)
   # -----------------------------------------------------------
-  
+
   # Policy A: The "Garbage Collector"
   # Attempt to delete anything older than 30 days.
   cleanup_policies {

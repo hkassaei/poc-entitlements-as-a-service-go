@@ -1,0 +1,8 @@
+# Test-only cryptographic constants — not real secrets
+#
+# LOCAL_KEK_HEX: 32-byte test key used only in docker-compose.yml and unit tests
+# Mock subscriber Ki/OP values in seed files are MILENAGE test vectors, not production keys
+
+# docker-compose.yml — test LOCAL_KEK_HEX
+# mock-hss/tests/kms.test.ts — test KEK hex
+# tests/integration/setup.ts — test database credentials

@@ -32,7 +32,7 @@ resource "google_compute_security_policy" "entitlements_waf" {
     rate_limit_options {
       conform_action = "allow"
       exceed_action  = "deny(429)"
-      
+
       # Tuned: 100/sec is extremely high for a single user.
       # 2000 requests in 5 minutes is a safer "real user" ceiling.
       rate_limit_threshold {
@@ -47,10 +47,10 @@ resource "google_compute_security_policy" "entitlements_waf" {
   # -----------------------------------------------------------
   # 3. OWASP Core Rule Set (SQLi, XSS, RCE, LFI)
   # -----------------------------------------------------------
-  
+
   # Grouping critical vulnerability protections
   # NOTE: We use 'preview = true' for the first week to detect false positives
-  
+
   rule {
     action   = "deny(403)"
     priority = "2000"

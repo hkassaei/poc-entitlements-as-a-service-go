@@ -22,7 +22,7 @@ import {
   type EapAttribute,
 } from './eapCodec.js';
 import { buildIdentity, deriveMasterKey, deriveKeys, computeMac, verifyMac } from './keyDerivation.js';
-import { fetchVectors, resyncVectors, HssSubscriberNotFoundError } from './eapAkaVectors.js';
+import { fetchVectors, resyncVectors } from './eapAkaVectors.js';
 import { createSession, getSession, deleteSession, updateSession } from './eapSession.js';
 import { findSubscriberByImsi } from './tokenService.js';
 import { generateReauthId, storeReauthState } from './reauthStore.js';
@@ -58,7 +58,7 @@ function nextIdentifier(): number {
  */
 export async function handleInitialRequest(
   imsi: string,
-  clientIp: string,
+  _clientIp: string,
 ): Promise<ChallengeResult> {
   // Fetch vectors from mock HSS
   const vectors = await fetchVectors(imsi);
@@ -131,7 +131,7 @@ export async function handleInitialRequest(
 export async function handleEapResponse(
   eapRelayBase64: string,
   sessionId: string,
-  clientIp: string,
+  _clientIp: string,
 ): Promise<AuthResult> {
   // Retrieve session
   const session = await getSession(sessionId);

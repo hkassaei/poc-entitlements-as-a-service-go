@@ -16,9 +16,7 @@ const R1 = 64;
 const R2 = 0;
 const R3 = 32;
 const R4 = 64;
-const R5 = 96;
-
-// R1* = 64 (same as R1), R5* = 0 (NOT 96)
+// R1* = 64 (same as R1), R5* = 0 (NOT R5=96)
 const R1_STAR = 64;
 const R5_STAR = 0;
 

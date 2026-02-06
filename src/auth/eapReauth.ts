@@ -59,7 +59,7 @@ function nextReauthIdentifier(): number {
  */
 export async function handleReauthRequest(
   reauthId: string,
-  clientIp: string,
+  _clientIp: string,
 ): Promise<ReauthChallengeResult | null> {
   const state = await getReauthState(reauthId);
   if (!state) {
