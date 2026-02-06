@@ -12,7 +12,7 @@ Protocol Compliance (GSMA TS.43 / EAP-AKA protocol as specified in RFC 4187). Al
 
 ## Project Knowledge
 
-See [JOURNAL.md](JOURNAL.md) for accumulated architectural decisions, gotchas, and lessons learned. Consult it before making changes to avoid repeating past mistakes.
+See [JOURNAL.md](JOURNAL.md) for accumulated architectural decisions, gotchas, and lessons learned. Consult it before making changes to avoid repeating past mistakes. When you learn something new (bugs, gotchas, architectural decisions, lessons), update JOURNAL.md to keep it current.
 
 ## Coding Best Practices
 Do not keep any dead code around. If you find dead code from previous iterations that is not exercised any more, refactor and clean them up. Always run all unit and integration tests after removing dead code.
