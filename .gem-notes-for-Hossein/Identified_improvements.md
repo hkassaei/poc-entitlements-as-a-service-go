@@ -147,8 +147,7 @@
   2. Token & Session Management
 
 
-   * Token Rotation Race Condition: In entitlementRoutes.ts, tokens are rotated (old revoked, new issued) on every POST. If a mobile device retries a request due to a transient network
-     failure after the server has processed the rotation, the retry will carry the "old" (now revoked) token and fail with a 401.
+   * Token Rotation Race Condition: In entitlementRoutes.ts, tokens are rotated (old revoked, new issued) on every POST. If a mobile device retries a request due to a transient network failure after the server has processed the rotation, the retry will carry the "old" (now revoked) token and fail with a 401.
        * Recommendation: Implement a short "grace period" (e.g., 30-60 seconds) where the previous token remains valid for retries.
    * Static Identifier Counter: The identifierCounter in eapAka.ts is local to the Node.js process memory. In a multi-instance Cloud Run environment, different instances will reuse the
      same EAP identifiers, which can cause collision issues on some client implementations.
@@ -164,12 +163,19 @@
 
   4. Security Risks
 
-
-   * Audit Log Redaction: While the code intends to avoid logging sensitive data, there is no centralized filter in the audit_log database logic to ensure that eap_relay or partial tokens
-     are consistently redacted before being stored in the request_summary JSONB field.
    * Timing Safety: Although crypto.timingSafeEqual is used for AT_RES verification, the session lookup itself happens before MAC verification. A high-resolution timing attack could
      potentially be used to probe for valid session IDs in Redis.
 
 
   I recommend prioritizing the Token Rotation Grace Period and the SQN Sync Failure handling to ensure a robust user experience on real-world mobile networks.
+
+  ## Fast Re-auth in compliance to TS.43 issue
+  Fix to TS.43 compliance for fast re-auth is described in "implementation_improvement_EAP-AKA_Fast_Re-auth.md and was implemented.
+
+  ## SQN issue
+  Fix is described in "implementation_improvement_SQN_issue.md" and was implemented.
+
+  ## Incomplete attribute handling (AT_CHECKCODE)
+
+  Debating where it should be fixed. Details in "implementation_improvement_AT_CHECKCODE.md"
 
