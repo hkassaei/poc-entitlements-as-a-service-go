@@ -1919,10 +1919,187 @@ The token is gone. The request is debuggable. Security and observability coexist
 
 ---
 
+## Phase 13: CI/CD Pipeline — The Quality Gates
+
+### Why This Matters
+
+Up to Phase 12, there was a dirty secret: **nothing stopped bad code from reaching main**. You could push a syntax error, a broken import, a test regression, or a Terraform misconfiguration, and nobody would know until Cloud Build blew up during deployment — or worse, until something broke in production.
+
+That's like running a restaurant where nobody checks if the food is cooked before it goes to the table. It works fine when you're the only cook and you're careful. It falls apart the moment a second person joins, or the moment you're tired and skip a step, or the moment you're moving fast because there's a deadline.
+
+A CI/CD pipeline is the health inspector. It doesn't cook the food, but it ensures nothing unsafe leaves the kitchen.
+
+### The Architecture: Hybrid CI/CD
+
+We went with a **hybrid approach** — GitHub Actions for CI (quality checks), Cloud Build for CD (deployment). Here's why:
+
+**GitHub Actions handles the "is this code any good?" question.** It's where the code lives (GitHub), so it can run checks on every PR before anyone reviews it. The reviewer sees green checks and knows: it compiles, lint passes, tests pass, Terraform is valid, no secrets leaked, no known vulnerabilities.
+
+**Cloud Build handles the "ship it" question.** It already had the GCP credentials, the Artifact Registry access, the Terraform state bucket, and the deployment pipeline. Rebuilding all of that in GitHub Actions would mean managing GCP service account keys as GitHub secrets — an unnecessary security risk.
+
+The boundary is clean: GitHub Actions decides if code is *allowed* to merge. Cloud Build decides how it *gets deployed*.
+
+```
+Feature Branch → PR → GitHub Actions (quality gates) → Merge → Cloud Build (deploy)
+                       |                                        |
+                       ├── Build & Lint                         ├── Build Docker images
+                       ├── Unit Tests (no DB)                   ├── Push to Artifact Registry
+                       ├── Integration Tests (full stack)       ├── Terraform apply
+                       ├── Terraform Validate                   ├── Database migrations
+                       ├── CodeQL (SAST)                        └── Smoke test
+                       ├── Gitleaks (secret detection)
+                       ├── Checkov (IaC security)
+                       └── Trivy (container CVEs)
+```
+
+### Step 1: ESLint — Teaching the Machine to Read Code
+
+The project had zero linting. Every codebase accumulates small inconsistencies over time — unused imports, variables that were renamed but not everywhere, type annotations that could be stricter. Individually harmless, collectively they make code harder to read and maintain.
+
+We added ESLint v9 with TypeScript support. The interesting engineering lesson was about **ESLint's relationship with TypeScript's project service**.
+
+ESLint's TypeScript integration works by asking TypeScript to analyze your code. But TypeScript needs a `tsconfig.json` to know which files to analyze. Our test files aren't in `tsconfig.json` (because `rootDir` is `src/`, and tests live in `tests/`). So when ESLint tried to analyze test files with the TypeScript project service, it failed.
+
+The naive fix — `allowDefaultProject: ['tests/**/*.ts']` — is explicitly forbidden by typescript-eslint. They block `**` globs because analyzing hundreds of files without a tsconfig causes severe performance degradation.
+
+The real fix: **disable type-aware linting for test files entirely**. Test files don't need the TypeScript project service — they're not shipped to production, and the type-aware rules (like `consistent-type-imports` detecting `import()` type annotations) provide minimal value there:
+
+```javascript
+{
+  files: ['tests/**/*.ts'],
+  languageOptions: {
+    parserOptions: { projectService: false },
+  },
+  rules: {
+    '@typescript-eslint/consistent-type-imports': 'off',
+  },
+}
+```
+
+ESLint immediately found real issues: an unused `HssSubscriberNotFoundError` import, three `clientIp` parameters that were accepted but never used, and `import { TypeBoxTypeProvider }` that should have been `import type` (it's only used in a generic type position). These are exactly the kind of issues that accumulate silently.
+
+### Step 2: The Vitest Config Split — A Critical Subtlety
+
+This was the most important foundational change. The original `vitest.config.ts` had:
+
+```typescript
+export default defineConfig({
+  test: {
+    globalSetup: ['./tests/integration/setup.ts'],
+  },
+});
+```
+
+That `globalSetup` connects to PostgreSQL to seed test data. It runs *before any test executes*. When you run `npm run test:unit`, Vitest first runs the global setup (tries to connect to Postgres), then runs unit tests. In CI's unit test job, there's no database. The tests don't fail because of a test bug — they fail because the *setup* can't reach the database.
+
+The fix: two config files. `vitest.config.ts` becomes the base config (no globalSetup), and `vitest.integration.config.ts` adds the database seeding. The scripts in `package.json` point to the right config:
+
+```json
+"test:unit": "vitest run tests/unit",
+"test:integration": "vitest run tests/integration --config vitest.integration.config.ts",
+"test": "vitest run --config vitest.integration.config.ts"
+```
+
+There's a deeper lesson here: **global test setup is a code smell when you have mixed test types**. If your setup does infrastructure work (database connections, network calls), it implicitly makes *all* tests into integration tests. The boundary between unit and integration tests should be enforced at the configuration level, not just the file system level.
+
+And then we discovered a related problem: `tokenService.test.ts` lived in `tests/unit/` but imported `db` (PostgreSQL) and `redis` directly. It was a unit test in name only. In Node.js, module-level side effects execute at import time — `import { db } from '../../src/db/index.js'` creates a connection pool the moment the module loads, not when you call a function. If your test imports a database module, it's an integration test, regardless of what folder it's in. We moved it to `tests/integration/`.
+
+### Step 3: The CI Workflow — Four Parallel Quality Gates
+
+The CI workflow (`.github/workflows/ci.yml`) has four jobs:
+
+**Job 1: Build & Lint.** Compiles both TypeScript projects (ECS and mock-hss) and runs ESLint on both. This is the cheapest check — if the code doesn't compile, nothing else matters.
+
+**Job 2: Unit Tests.** Runs 182 tests with no database. This proves the business logic is correct in isolation. Tests run in ~1.3 seconds. The key insight: these tests cover the EAP-AKA codec, key derivation, MILENAGE cryptography, service handlers, and response building — the most complex and error-prone code — without needing any infrastructure.
+
+**Job 3: Integration Tests.** Runs 28 tests with PostgreSQL, Redis, and mock-hss as service containers. GitHub Actions supports `services:` blocks that spin up Docker containers alongside your job. The health check syntax is different from docker-compose:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    options: >-
+      --health-cmd "pg_isready -U ecs -d entitlements"
+      --health-interval 5s
+      --health-timeout 5s
+      --health-retries 5
+```
+
+One subtlety that bit us: the project uses Drizzle ORM with migration files (`drizzle-kit migrate`), but **the migration files were never committed to the repo**. The `drizzle/` folder was in neither `.gitignore` nor Git — it simply never existed. CI can't run migrations without migration SQL files. The fix: use `drizzle-kit push --force` instead, which reads `schema.ts` and applies DDL directly to the database. This is fine for CI/dev — production should eventually use committed migration files for audit trails and rollback capability.
+
+**Job 4: Terraform Validate.** Runs `terraform fmt -check -recursive`, `terraform init -backend=false`, and `terraform validate`. No GCP credentials needed — it validates syntax, type correctness, and configuration structure. Six Terraform files had formatting drift that nobody had noticed.
+
+### Step 4: The Security Workflow — Defense in Depth
+
+Security scanning runs in a separate workflow (`.github/workflows/security.yml`) with five jobs:
+
+**CodeQL** is GitHub's SAST (Static Application Security Testing) engine. It builds an abstract model of your code and runs queries that find vulnerability patterns: SQL injection, XSS, prototype pollution, insecure randomness. It also runs on a weekly schedule to catch *new vulnerability patterns* added to the query database — your code might be vulnerable to something that wasn't known when you wrote it.
+
+One gotcha: CodeQL requires manual enablement in the repo settings. The GitHub Action alone isn't enough — you must go to Settings > Code security and analysis > Code scanning and enable it. Without this, the analyze step fails with a permissions error that looks like an action bug but is actually a configuration requirement.
+
+**Gitleaks** scans the entire git history for accidentally committed secrets: API keys, passwords, private keys, tokens. It's embarrassingly common to commit a `.env` file, realize the mistake, delete it in the next commit, and think the problem is solved. It's not — the secret lives forever in git history. Gitleaks catches this by scanning *every commit*, not just the current tree.
+
+**Checkov** scans the Terraform code for security misconfigurations. It found 10 findings on first run — things like PostgreSQL audit logging not enabled, Cloud Armor missing a Log4j WAF rule, and Artifact Registry not using customer-managed encryption keys. We started with `soft_fail: true` (report but don't block) so we could triage: which findings need fixing now, which are acceptable for dev/staging, and which should be addressed before production?
+
+**Trivy** scans Docker images for known CVEs. It immediately found vulnerabilities in `node:20-slim` — glibc heap corruption (CVE-2026-0861) and a zlib buffer overflow (CVE-2023-45853, marked `will_not_fix` by Debian). These are base image problems with no fix available. We set `exit-code: "0"` to report without blocking. The alternative is switching to Alpine or distroless base images, which have different trade-offs (Alpine uses musl libc instead of glibc, which can cause subtle Node.js compatibility issues).
+
+### Step 5: Dependabot — Automated Dependency Management
+
+Dependabot (`.github/dependabot.yml`) watches four ecosystems:
+- npm dependencies for ECS (weekly)
+- npm dependencies for mock-hss (weekly)
+- Terraform provider versions (monthly)
+- GitHub Actions versions (monthly)
+
+**One lesson learned the hard way**: Dependabot activates *immediately* when you push the config. Within 60 seconds of our push, it opened PRs to bump `actions/checkout` v4→v6, `actions/setup-node` v4→v6, the Google Terraform provider 5.x→7.x, and several npm packages. Without the `groups` setting to batch minor+patch updates, you'd get one PR per dependency — a flood.
+
+The beautiful part: every Dependabot PR runs through the full CI pipeline. If a dependency update breaks the build, breaks tests, or introduces a security issue, you find out *before* it reaches your codebase. Automated dependency updates aren't just about convenience — they're about catching breaking changes early.
+
+### The Bugs We Found and Fixed
+
+**Bug 1: The "Unit Test That Wasn't."** `tokenService.test.ts` in `tests/unit/` imported `db` and `redis` modules. These create connection pools at import time. Locally it passed because Docker was running. In CI without a database, it crashed with `ECONNREFUSED` before any test assertion executed. This is a common trap in Node.js — modules can have side effects on import that aren't obvious from the test code.
+
+**Bug 2: Missing Migration Files.** `drizzle-kit migrate` requires SQL migration files in a `drizzle/` directory. These files are generated by `drizzle-kit generate` but were never committed. The project was using `drizzle-kit push` locally (which doesn't need migration files) but the CI workflow was calling `drizzle-kit migrate`. The error message — `Can't find meta/_journal.json file` — doesn't clearly say "you have no migration files", making it hard to diagnose.
+
+**Bug 3: CodeQL v3 Deprecation.** We initially used `github/codeql-action@v3`, which is deprecated in December 2026. GitHub annotated our run with a deprecation warning. Upgraded to v4.
+
+**Bug 4: Trivy Blocking on Unfixable CVEs.** We initially set `exit-code: "1"` for Trivy, meaning any HIGH/CRITICAL CVE would fail the pipeline. But the `node:20-slim` base image has CVEs in system libraries (glibc, zlib) with no upstream fix. The pipeline would be permanently broken until Debian patches their stable release. Changed to `exit-code: "0"` so Trivy reports but doesn't block.
+
+**Bug 5: Terraform Formatting Drift.** Six `.tf` files had formatting inconsistencies that accumulated over time. Nobody noticed because `terraform fmt` wasn't part of any workflow. The `terraform fmt -check -recursive` gate in CI caught all of them immediately.
+
+### What Good Engineers Learn From This
+
+**1. CI finds different bugs than local testing.** You can run all tests locally and have them pass, then push and watch CI fail. The difference is the environment: CI has no Docker services, no warm caches, no leftover state from previous runs. CI tests your code in a *clean room*. If it works in CI, it works everywhere.
+
+**2. The distinction between unit and integration tests isn't about intent — it's about dependencies.** A test that imports a database module isn't a unit test, even if it only tests one function. The database connection is an implicit dependency that becomes visible when you remove the database.
+
+**3. Start with soft-fail, then tighten.** We launched Checkov and Trivy with soft-fail mode. This lets you see the full baseline of findings before deciding which ones to fix, which to accept, and which to defer. Starting with hard-fail means your pipeline is broken on day one, which creates pressure to skip findings rather than triage them properly.
+
+**4. Security scanning is layered because attacks are layered.** CodeQL catches logic bugs (SQL injection, XSS). Gitleaks catches human mistakes (committed secrets). Checkov catches infrastructure misconfigurations (overly permissive IAM). Trivy catches supply chain issues (vulnerable dependencies). No single tool covers everything. The combination is what matters.
+
+**5. Automated dependency updates are a security feature, not a convenience feature.** Most production vulnerabilities come from known CVEs in dependencies. Dependabot creates a PR, CI validates it, and you merge it — turning a multi-hour security patch process into a one-click approval.
+
+### The New File Structure
+
+```
+.github/
+├── workflows/
+│   ├── ci.yml              # Build, lint, unit tests, integration tests, Terraform validate
+│   └── security.yml        # CodeQL, Gitleaks, Checkov, Trivy
+├── dependabot.yml          # Automated dependency updates (npm, Terraform, GH Actions)
+eslint.config.js            # ESLint v9 flat config with TypeScript (ECS)
+mock-hss/eslint.config.js   # ESLint v9 flat config with TypeScript (mock-hss)
+vitest.config.ts            # Base vitest config (no DB — for unit tests)
+vitest.integration.config.ts # Integration vitest config (with globalSetup for DB seeding)
+.gitleaksignore             # Allowlist for known test secrets
+```
+
+---
+
 ## What's Coming Next
 
-- **Phase 13: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
-- **Phase 14: Testing & Hardening**: Load testing, error handling audit, logging completeness
+- **Phase 14: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
+- **Phase 15: Testing & Hardening**: Load testing, error handling audit, logging completeness
 
 ---
 
