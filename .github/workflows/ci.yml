@@ -130,8 +130,8 @@ jobs:
         run: npm run build
         working-directory: mock-hss
 
-      - name: Run DB migrations
-        run: npx drizzle-kit migrate
+      - name: Push DB schema
+        run: npx drizzle-kit push --force
 
       - name: Seed mock-hss subscribers
         run: node mock-hss/dist/seed.js
