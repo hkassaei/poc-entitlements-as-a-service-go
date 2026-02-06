@@ -1738,10 +1738,191 @@ Sometimes the best outcome of a bug report is "there's no bug, but here's what w
 
 ---
 
+## Phase 12: Audit Logging — Allowlists Beat Blocklists
+
+Another security concern came in: "The audit_log table exists but there's no centralized filter to ensure that `eap_relay` or partial tokens are consistently redacted before being stored."
+
+Investigation revealed something even more interesting: **the audit logging feature was never implemented**. The table schema existed since Phase 1, but zero code ever wrote to it. Another piece of dead infrastructure — a table waiting for a feature that never came.
+
+So we built it properly.
+
+### The Blocklist Trap
+
+The naive approach to redaction is a blocklist:
+
+```typescript
+// DON'T DO THIS
+function redactRequest(body: object): object {
+  const copy = { ...body };
+  delete copy.token;
+  delete copy.eap_relay;
+  delete copy.imsi;
+  return copy;
+}
+```
+
+This is dangerous because:
+1. New sensitive fields get logged until someone remembers to add them to the blocklist
+2. Typos in field names (e.g., `Token` vs `token`) bypass the filter
+3. Nested objects might contain sensitive data that isn't checked
+
+### The Allowlist Solution
+
+We flipped the model: **only explicitly listed fields are logged**.
+
+```typescript
+const ALLOWED_FIELDS = new Set([
+  'app',
+  'terminal_id',
+  'entitlement_version',
+  'accept_content_type',
+  'operation',
+  'operation_type',
+]);
+
+const REDACTED_FIELDS = new Set([
+  'imsi',
+  'token',
+  'eap_relay',
+]);
+
+const OMITTED_FIELDS = new Set([
+  'ki',
+  'op',
+  'password',
+  'secret',
+]);
+```
+
+The logic:
+1. If the field is in `ALLOWED_FIELDS` → log it in full
+2. If the field is in `REDACTED_FIELDS` → log `[REDACTED:64chars]` (shows presence and length, not value)
+3. If the field is in `OMITTED_FIELDS` → don't log anything
+4. **If the field is unknown → don't log it** (fail-safe!)
+
+That last rule is the key insight. When someone adds a new field `subscriber_secret_key` to the request schema, it **won't appear in audit logs** until someone explicitly adds it to the allowlist. The default is "don't log," not "log everything."
+
+### The Three-Tier Classification
+
+We ended up with three categories, each serving a different purpose:
+
+**Allowed (logged verbatim):**
+- `app` — which service is being accessed
+- `terminal_id` — device identifier (not sensitive, needed for debugging)
+- `operation` — what action was requested
+- `entitlement_version` — protocol version
+
+**Redacted (presence logged, value hidden):**
+- `imsi` → `[REDACTED:15chars]` — we know an IMSI was provided, but not which one
+- `token` → `[REDACTED:64chars]` — we know a token was used, but can't extract it from logs
+- `eap_relay` → `[REDACTED:200chars]` — we know there was an EAP packet, but can't decode it
+
+**Omitted (completely invisible):**
+- `ki`, `op` — cryptographic secrets that should never appear anywhere
+- `password`, `secret` — catch-all for any future sensitive fields
+
+The redaction format `[REDACTED:Nchars]` is deliberate. It tells you:
+- The field was present (vs. missing)
+- The approximate size (useful for debugging "why was this 0 chars?")
+- Nothing about the actual content
+
+### Fire-and-Forget Architecture
+
+Audit logging should never slow down requests or cause failures. We use Fastify's `onResponse` hook:
+
+```typescript
+app.addHook('onResponse', auditLogger);
+```
+
+This fires **after** the response is sent to the client. The hook calls `logAuditEvent()` without awaiting:
+
+```typescript
+logAuditEvent(event).catch(() => {
+  // Error already logged internally
+});
+```
+
+If the database is down or slow, the audit log silently fails. The client gets their response regardless. This is the right trade-off: audit logs are important, but not more important than serving requests.
+
+### What Gets Logged
+
+Each audit record captures:
+
+| Field | Source | Purpose |
+|-------|--------|---------|
+| `subscriber_id` | Auth context | Who made the request (if known) |
+| `app_id` | Request body | Which service (ap2004, ap2006, etc.) |
+| `operation` | Request body | What action (ManageSubscription, etc.) |
+| `request_summary` | Redacted body/query | Safe subset of request data |
+| `response_code` | HTTP status | Success/failure indication |
+| `client_ip` | Request metadata | Geographic/abuse analysis |
+| `user_agent` | Headers | Client identification |
+
+The `request_summary` JSONB field also includes `_method` and `_path` for full request context.
+
+### Lessons From Audit Logging
+
+**35. Allowlists are safer than blocklists for security.** This principle applies everywhere: firewall rules, input validation, output encoding, and log redaction. "Deny by default, allow explicitly" catches mistakes that "allow by default, deny explicitly" misses.
+
+**36. Dead infrastructure is worse than dead code.** A table schema that exists but is never populated is confusing. Developers might think "audit logging works" because they see the table. They might even write queries against it, not realizing it's always empty. At least dead code is obviously dead when you grep for usages.
+
+**37. Redaction should be informative but safe.** `[REDACTED:64chars]` is better than `[REDACTED]` (tells you the field was present and roughly how big) and better than `a]` (first/last char leak). The format should help debugging without leaking secrets.
+
+**38. Audit hooks belong in onResponse, not onRequest.** If you audit on request, you don't know the response code. If you audit in the route handler, you have to remember to call it in every route. The `onResponse` hook fires exactly once per request, after everything is done, with access to both request and response data.
+
+**39. Fire-and-forget is the right pattern for observability.** Metrics, logs, and traces should never block the happy path. If your monitoring infrastructure is down, your application should keep working. This means: no `await`, catch all errors, log failures but don't throw.
+
+### The Code Structure
+
+```
+src/db/
+  auditService.ts       — extractAuditableRequest(), logAuditEvent()
+
+src/server/middleware/
+  auditLogger.ts        — Fastify onResponse hook
+
+tests/unit/
+  auditService.test.ts  — 28 tests covering all redaction scenarios
+```
+
+### Example Audit Record
+
+A real request like:
+
+```json
+{
+  "app": "ap2006",
+  "terminal_id": "12345678901234",
+  "entitlement_version": "2",
+  "token": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "operation": "ManageSubscription",
+  "operation_type": 1
+}
+```
+
+Gets logged as:
+
+```json
+{
+  "app": "ap2006",
+  "terminal_id": "12345678901234",
+  "entitlement_version": "2",
+  "token": "[REDACTED:64chars]",
+  "operation": "ManageSubscription",
+  "operation_type": 1,
+  "_method": "POST",
+  "_path": "/entitlement"
+}
+```
+
+The token is gone. The request is debuggable. Security and observability coexist.
+
+---
+
 ## What's Coming Next
 
-- **Phase 12: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
-- **Phase 13: Testing & Hardening**: Load testing, error handling audit, logging completeness
+- **Phase 13: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
+- **Phase 14: Testing & Hardening**: Load testing, error handling audit, logging completeness
 
 ---
 
