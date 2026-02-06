@@ -2096,10 +2096,131 @@ vitest.integration.config.ts # Integration vitest config (with globalSetup for D
 
 ---
 
+## Phase 14: Bulk Dependency Upgrade — Keeping the Foundation Current
+
+### Why This Matters
+
+Imagine building a house on a foundation of bricks. Each brick is a dependency — a library someone else wrote that your code stands on. Over time, those bricks get updated: security patches, performance improvements, API redesigns. If you ignore updates for too long, you end up with a foundation made of obsolete bricks — and the longer you wait, the harder it is to replace them, because the new bricks have different shapes.
+
+The moment we turned on Dependabot in Phase 13, it opened **22 pull requests** within 60 seconds. Twenty-two bricks that needed replacing. Six were safe minor bumps (actions/checkout, actions/setup-node, dotenv, @types/node, drizzle-orm for mock-hss) that we merged individually. The remaining 14 were all **major version bumps** — the kind that change the shape of the brick and require you to reshape the mortar around it.
+
+We had a choice: merge 14 PRs one-by-one, fixing each one's breaking changes in isolation, or do them all at once in a single coordinated upgrade. We chose the bulk approach for a simple reason: **nothing is deployed yet**. There are no users, no production traffic, no backwards compatibility concerns. This is the one time in a project's life when you can rip out 14 foundations and replace them all at once with zero risk to anyone.
+
+### The Upgrades
+
+Here's what changed and why each one mattered:
+
+**OpenTelemetry v2** (10 packages, the biggest change)
+
+The OpenTelemetry JavaScript SDK unified its versioning. Experimental packages jumped from 0.57 to 0.211, stable packages from 1.x to 2.x. The most visible breaking change: the `Resource` class was replaced with a `resourceFromAttributes()` function.
+
+```typescript
+// Before (OTel v1):
+import { Resource } from '@opentelemetry/resources';
+const resource = new Resource({
+  [ATTR_SERVICE_NAME]: 'entitlements-ecs',
+});
+
+// After (OTel v2):
+import { resourceFromAttributes } from '@opentelemetry/resources';
+const resource = resourceFromAttributes({
+  [ATTR_SERVICE_NAME]: 'entitlements-ecs',
+});
+```
+
+Why did they make this change? The `Resource` class had a merge problem — when two systems tried to describe the same resource with different attributes, merging `Resource` objects was awkward and error-prone. A plain function that returns an immutable object is simpler and composes better. This is a pattern you see across the JavaScript ecosystem: classes being replaced by factory functions. Classes carry the weight of `this` binding, inheritance hierarchies, and mutable state. Functions are lighter.
+
+The beautiful thing: **only two files needed code changes** (`tracing.ts` and `metrics.ts`). Everything else — the NodeSDK constructor, MeterProvider, instrumentations, semantic conventions — stayed the same. A well-designed API minimizes the blast radius of breaking changes.
+
+**TypeBox v1** (rebranded from `@sinclair/typebox`)
+
+TypeBox is the schema validation library that powers our Fastify request validation. It went from `@sinclair/typebox` v0.34 to `typebox` v1.0 — a full rename. The APIs (`Type.Object`, `Type.String`, `Type.Literal`, `Static<>`) are identical. The only change was updating import paths in three files:
+
+```typescript
+// Before:
+import { Type } from '@sinclair/typebox';
+
+// After:
+import { Type } from 'typebox';
+```
+
+This also required upgrading `@fastify/type-provider-typebox` from v5 to v6, since v6 expects the new `typebox` package. This is an example of **dependency coupling** — when library A depends on library B, upgrading B often forces an upgrade of A. Good library authors handle this by releasing their own major version bump at the same time.
+
+**Pino v10** (logging)
+
+Pino v10's only breaking change: it dropped Node.js 18 support. Both our projects already require Node >=20. Zero code changes. This is the dream upgrade — a major version bump that's a no-op for your codebase because you were already on the right side of the compatibility line.
+
+**Vitest v4** (testing)
+
+Vitest v4's main breaking change: hooks that return non-undefined values are now treated as teardown functions. Our hooks use standard patterns (no accidental returns), so no code changes were needed. All 246 tests (182 unit + 28 integration + 36 mock-hss) pass without modification.
+
+**@google-cloud/kms v5** (mock-hss only)
+
+We only use `KeyManagementServiceClient` for one thing: decrypting wrapped DEKs. Google Cloud client library major bumps are usually about dropping old Node.js versions and updating internal gRPC bindings. No API changes for basic usage. Zero code changes.
+
+**Drizzle ORM v0.45 + Drizzle Kit v0.31**
+
+Drizzle ORM went from v0.38 to v0.45 (still in 0.x, so technically every minor version can be breaking). Our usage — `db.select().from(table).where(eq(...))` — is the most common pattern and remained stable. Drizzle Kit v0.31 updated the `push` command we use in CI.
+
+**hashicorp/google v7** (Terraform provider)
+
+This was the one that required detective work. The Google Terraform provider v7 removes deprecated arguments. When we ran `terraform validate`, it immediately caught the issue:
+
+```
+Error: Unsupported argument
+  on modules/database/main.tf line 30:
+  30:       require_ssl = true
+An argument named "require_ssl" is not expected here.
+```
+
+The `require_ssl` boolean was replaced by `ssl_mode`, which is an enum with more granular options. We changed it to `ssl_mode = "ENCRYPTED_ONLY"`, which is semantically equivalent — all connections must use TLS, no exceptions.
+
+This is a recurring theme with Terraform provider upgrades: boolean flags get replaced by enums as cloud platforms add more options. `require_ssl = true` could only express "SSL required" or "SSL optional". `ssl_mode` can express "ENCRYPTED_ONLY", "TRUSTED_CLIENT_CERTIFICATE_REQUIRED", "ALLOW_UNENCRYPTED_AND_ENCRYPTED", and more. The upgrade from booleans to enums is annoying in the moment but produces more precise infrastructure-as-code.
+
+### The Strategy: Why Bulk Upgrades Work (Sometimes)
+
+Bulk upgrades are usually a bad idea. In a running production system, you want to upgrade one dependency at a time so you can pinpoint which change broke something. If you upgrade 14 things at once and tests fail, you have 14 suspects.
+
+But there are moments when bulk upgrades are the right call:
+
+1. **Pre-production**: Nothing is deployed. No users are affected. You can be bold.
+2. **Good test coverage**: 246 tests across unit and integration suites. If something breaks, you'll know.
+3. **Interdependent upgrades**: TypeBox v1 requires type-provider v6. OTel v2 requires all OTel packages to move together. Some upgrades are inherently coupled.
+4. **Dependabot PR explosion**: 14 open PRs create review fatigue. A single coordinated upgrade is easier to review than 14 individual ones.
+
+After committing the upgrade to main, we closed all 14 Dependabot PRs with a comment: "Superseded by bulk dependency upgrade on main." Dependabot is smart enough to not reopen PRs for versions that are already satisfied.
+
+### The Verification Checklist
+
+Every dependency upgrade should be verified at multiple levels:
+
+1. **`npm install`** — Does the dependency tree resolve? (No peer dependency conflicts)
+2. **`npm run build`** — Does TypeScript compile? (Catches renamed/removed exports)
+3. **`npm run lint`** — Does ESLint pass? (Catches import path issues)
+4. **`npm run test:unit`** — Do unit tests pass? (Catches API behavior changes)
+5. **`npm run test:integration`** — Do integration tests pass? (Catches runtime compatibility)
+6. **`terraform init -upgrade && terraform validate`** — Does the infra config validate? (Catches removed/renamed arguments)
+
+All six passed on the first try. That's not luck — it's the result of choosing dependencies with good backwards compatibility track records and having tests that exercise the actual API surface.
+
+### What Good Engineers Learn From This
+
+**1. Don't fear major version bumps — read the changelog.** Most major bumps have a small number of breaking changes, and most of those breaking changes don't affect your usage. The OpenTelemetry v2 upgrade touched 10 packages but only required changing 2 lines of code. Reading the migration guide takes 5 minutes; avoiding the upgrade accumulates months of security debt.
+
+**2. The best time to upgrade is before production.** Every dependency upgrade carries risk. That risk is proportional to the number of users affected by a regression. Pre-production, that number is zero. Take advantage of it.
+
+**3. Terraform provider upgrades require `terraform validate`, not just `terraform init`.** `init` downloads the new provider. `validate` runs the schema checker that catches removed arguments. These are two separate steps and both are necessary.
+
+**4. Lock files are part of the upgrade.** `package-lock.json` and `.terraform.lock.hcl` pin exact versions. Upgrading `package.json` without regenerating `package-lock.json` (via `npm install`) leaves the lock file pointing at old versions. Always commit both together.
+
+**5. Coupled dependencies should be upgraded together.** TypeBox + type-provider, all OTel packages, Drizzle ORM + Kit — these are packages that know about each other. Upgrading one without the other creates version mismatches that produce confusing errors. Identify the dependency clusters and upgrade them as a unit.
+
+---
+
 ## What's Coming Next
 
-- **Phase 14: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
-- **Phase 15: Testing & Hardening**: Load testing, error handling audit, logging completeness
+- **Phase 15: Observability**: Custom application metrics, Cloud Monitoring dashboards, alerting policies, trace-log correlation
+- **Phase 16: Testing & Hardening**: Load testing, error handling audit, logging completeness
 
 ---
 
