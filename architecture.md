@@ -385,3 +385,60 @@ The final pass to ensure the system is correct, resilient, and production-ready.
 | 5 | Logging and audit trail completeness | Every request creates an audit log entry. Sensitive fields (Ki, OP, DEK, full token values) never appear in any log at any level. Token values are redacted to last 8 characters. |
 
 **Exit criteria:** All tests pass. Load test shows no connection exhaustion or session corruption. Every spec HTTP status code is covered. Audit log is complete and contains no sensitive material.
+
+# CICD Pipeline Architecture
+
+```mermaid
+graph TD
+    %% Define Styles
+    classDef github fill:#24292e,stroke:#fff,color:#fff;
+    classDef gcp fill:#4285F4,stroke:#fff,color:#fff;
+    classDef security fill:#d32f2f,stroke:#fff,color:#fff;
+    classDef gate fill:#f9a825,stroke:#333,color:#000;
+
+    subgraph Github_Actions ["GitHub Actions (CI & Security Gates)"]
+        direction TB
+        Start((Developer Commit)) --> PR[Create Pull Request]
+
+        subgraph Quality_Checks ["Quality & Unit Gates"]
+            Lint[ESLint / Prettier]
+            Build[TS Compilation]
+            Unit[Unit Tests - Vitest]
+        end
+
+        subgraph Security_Gates ["Security Gates (OWASP & Secrets)"]
+            CodeQL[CodeQL: SAST / OWASP Top 10]
+            Gitleaks[Gitleaks: Secret Scanning]
+            Checkov[Checkov: IaC Scanning]
+            Dependabot[Dependabot: SCA / Deps]
+        end
+
+        PR --> Quality_Checks
+        PR --> Security_Gates
+
+        Quality_Checks --> IntTest[Integration Tests: PG/Redis Containers]
+        Security_Gates --> IntTest
+    end
+
+    IntTest -->|All Checks Pass| Merge{Merge to Main}:::gate
+
+    subgraph GCP_Cloud_Build ["Google Cloud Build (Trusted Artifacts)"]
+        Merge --> DockerBuild[Docker Build: ECS & Mock-HSS]
+        DockerBuild --> SBOM[Generate SBOM & SLSA Provenance]
+        SBOM --> Trivy[Trivy: Container Vulnerability Scan]
+        Trivy --> Sign[Binary Auth: Image Signing]
+    end
+
+    subgraph GCP_Cloud_Deploy ["Google Cloud Deploy (Controlled Rollout)"]
+        Sign --> DeployDev[Deploy to Dev: Cloud Run]
+        DeployDev --> Smoke[Smoke / Health Tests]
+        Smoke --> Approval{MANUAL APPROVAL}:::gate
+        Approval -->|Approved| BinAuth[Verify Binary Authorization]
+        BinAuth --> DeployProd[Deploy to Production: Cloud Run]
+    end
+
+    %% Apply Classes
+    class PR,Lint,Build,Unit,CodeQL,Gitleaks,Checkov,Dependabot,IntTest github;
+    class DockerBuild,SBOM,Trivy,Sign,DeployDev,Smoke,BinAuth,DeployProd gcp;
+    class CodeQL,Gitleaks,Checkov,Dependabot,Trivy,BinAuth security;
+```
