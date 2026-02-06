@@ -1,4 +1,4 @@
-import { Type } from '@sinclair/typebox';
+import { Type } from 'typebox';
 
 const AppIdSchema = Type.Union([
   Type.Literal('ap2003'),

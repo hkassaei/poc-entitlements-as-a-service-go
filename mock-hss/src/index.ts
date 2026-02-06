@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { Type } from '@sinclair/typebox';
+import { Type } from 'typebox';
 import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import { eq } from 'drizzle-orm';
 import { config } from './config.js';
