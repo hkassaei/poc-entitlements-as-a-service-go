@@ -2215,6 +2215,54 @@ All six passed on the first try. That's not luck — it's the result of choosing
 
 **5. Coupled dependencies should be upgraded together.** TypeBox + type-provider, all OTel packages, Drizzle ORM + Kit — these are packages that know about each other. Upgrading one without the other creates version mismatches that produce confusing errors. Identify the dependency clusters and upgrade them as a unit.
 
+### The Lingering Vulnerability: Transitive Dependencies and npm Overrides
+
+After the bulk upgrade, GitHub *still* flagged a moderate vulnerability. Dependabot pointed at `esbuild <= 0.24.2` (GHSA-67mh-4wv8-2f99) — esbuild's dev server sets `Access-Control-Allow-Origin: *` on all responses, meaning any malicious website could read your local dev server's files (source code, source maps, everything).
+
+We hadn't installed esbuild ourselves. Running `npm ls esbuild` revealed the dependency chain:
+
+```
+drizzle-kit@0.31.8
+└── @esbuild-kit/esm-loader@2.6.5
+    └── @esbuild-kit/core-utils@3.3.2
+        └── esbuild@0.18.20        ← vulnerable, pinned by core-utils
+```
+
+Meanwhile, other packages in our tree already had patched versions:
+```
+tsx@4.21.0 → esbuild@0.27.2         ← fine
+vitest@4.0.18 → vite → esbuild@0.27.3  ← fine
+drizzle-kit → esbuild@0.25.12       ← fine (direct dep)
+```
+
+The problem was `@esbuild-kit/core-utils` — an abandoned package that pinned `esbuild@0.18.20` in its own dependency spec. npm couldn't resolve it to a newer version because the pin was exact. And `npm audit fix --force` wanted to "help" by downgrading `drizzle-kit` from v0.31 all the way back to v0.18 — a cure worse than the disease.
+
+This is one of the most frustrating patterns in the npm ecosystem: **a transitive dependency you don't control pins a vulnerable version of a package you also don't control**. You can't fix `@esbuild-kit/core-utils` because you didn't write it. You can't remove it because `drizzle-kit` needs it. You can't downgrade `drizzle-kit` because you need the current version.
+
+The fix is **npm overrides** — a feature that lets you force a specific version resolution for any package in your dependency tree, regardless of what the intermediate packages request:
+
+```json
+{
+  "overrides": {
+    "esbuild": ">=0.25.0"
+  }
+}
+```
+
+This tells npm: "I don't care what `@esbuild-kit/core-utils` says it needs. Give it esbuild 0.25+ and let it deal with it." It's a blunt instrument — you're overriding the library author's version constraint. But for security patches, especially in dev-only dependencies, it's the right call.
+
+After adding the override: `npm install` → `npm audit` → **0 vulnerabilities**. Build and tests still pass because esbuild 0.25+ is API-compatible with 0.18 for the features drizzle-kit uses.
+
+There are a few lessons buried in this small fix:
+
+**1. `npm audit fix` is not always safe.** The `--force` flag can suggest downgrades that break your project. Always read what it proposes before accepting.
+
+**2. Transitive vulnerabilities are the norm, not the exception.** In any non-trivial Node.js project, the majority of your dependency tree is packages you never chose. You inherit their security posture.
+
+**3. npm overrides are the escape hatch for abandoned transitive deps.** When a package deep in the tree pins a vulnerable version and nobody is maintaining it, overrides let you patch the tree without waiting for an upstream fix that may never come.
+
+**4. "Dev dependency" doesn't mean "doesn't matter."** The vulnerable esbuild dev server could leak source code to any website a developer visits. That's a real attack vector for targeted espionage — an attacker who knows a developer is working on telecom security code could serve a malicious page that silently reads their local dev server. The probability is low, but the impact is high. Fix it anyway.
+
 ---
 
 ## What's Coming Next
