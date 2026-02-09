@@ -324,3 +324,107 @@ This is lightweight — it creates a GitHub deployment record pointing to the Cl
 ###  Terraform Formatting Drifts Silently
 
   6 of 33 .tf files had formatting issues that nobody noticed. The terraform fmt -check CI gate catches this immediately.
+
+
+---
+
+# CICD Adaptations for DEVENV 
+
+ Plan: Adapt CI/CD Pipeline for terraform-devenv + terraform
+
+ Context
+
+ The project has two Terraform configurations:
+ - terraform/ — staging/production: external ALB, Cloud Armor, HTTPS, public-facing
+ - terraform-devenv/ — devenv: internal ILB, no Cloud Armor, HTTP-only, no internet, sandboxed GCP
+
+ The CI workflow (ci.yml) only validates terraform/. The security workflow (security.yml) Checkov only scans terraform/. The CD pipeline (cloudbuild.yaml) hardcodes cd terraform for deployment. All three need
+  to support both environments.
+
+ ---
+ Step 1: ci.yml — Terraform validate becomes a matrix job
+
+ Convert the terraform-validate job to a matrix strategy that validates both directories in parallel.
+
+ File: .github/workflows/ci.yml (lines 160-180)
+
+ Replace the single terraform-validate job with:
+ terraform-validate:
+   name: Terraform Validate (${{ matrix.dir }})
+   runs-on: ubuntu-latest
+   strategy:
+     matrix:
+       dir: [terraform, terraform-devenv]
+   steps:
+     - uses: actions/checkout@v6
+     - uses: hashicorp/setup-terraform@v3
+       with:
+         terraform_version: "~1.5"
+     - name: Check formatting
+       run: terraform fmt -check -recursive
+       working-directory: ${{ matrix.dir }}
+     - name: Initialize (no backend)
+       run: terraform init -backend=false
+       working-directory: ${{ matrix.dir }}
+     - name: Validate
+       run: terraform validate
+       working-directory: ${{ matrix.dir }}
+
+ ---
+ Step 2: security.yml — Checkov scans both directories
+
+ Convert the checkov job to a matrix strategy that scans both Terraform directories.
+
+ File: .github/workflows/security.yml (lines 47-59)
+
+ Replace the single checkov job with:
+ checkov:
+   name: Infrastructure Security (${{ matrix.dir }})
+   runs-on: ubuntu-latest
+   strategy:
+     matrix:
+       dir: [terraform, terraform-devenv]
+   steps:
+     - uses: actions/checkout@v6
+     - uses: bridgecrewio/checkov-action@v12
+       with:
+         directory: ${{ matrix.dir }}/
+         framework: terraform
+         soft_fail: true
+         output_format: cli
+         quiet: true
+
+ ---
+ Step 3: cloudbuild.yaml — Parameterize Terraform directory
+
+ Add a _TERRAFORM_DIR substitution so the CD pipeline can target either environment. Default remains terraform (staging/prod). Devenv triggers override to terraform-devenv.
+
+ File: cloudbuild.yaml
+
+ Changes:
+ 1. Add substitution: _TERRAFORM_DIR: 'terraform'
+ 2. Step 4 (terraform-apply, line 60): change cd terraform → cd ${_TERRAFORM_DIR}
+
+ When creating a Cloud Build trigger for devenv, override:
+ - _TERRAFORM_DIR=terraform-devenv
+ - _ENVIRONMENT=devenv
+
+ ---
+ Step 4: Format terraform-devenv
+
+ Run terraform fmt -recursive on terraform-devenv/ so it passes the new CI formatting gate. The directory was created manually and may have drift.
+
+ ---
+ Files Modified
+
+ 1. .github/workflows/ci.yml — terraform-validate job → matrix with [terraform, terraform-devenv]
+ 2. .github/workflows/security.yml — checkov job → matrix with [terraform, terraform-devenv]
+ 3. cloudbuild.yaml — add _TERRAFORM_DIR substitution, use in terraform step
+ 4. terraform-devenv/**/*.tf — formatting fixes if needed (via terraform fmt)
+
+ Verification
+
+ 1. terraform -chdir=terraform-devenv fmt -check -recursive — no formatting drift
+ 2. terraform -chdir=terraform-devenv init -backend=false && terraform -chdir=terraform-devenv validate — validates clean
+ 3. terraform -chdir=terraform fmt -check -recursive && terraform -chdir=terraform init -backend=false && terraform -chdir=terraform validate — original still validates
+ 4. YAML syntax review of ci.yml and security.yml
