@@ -103,8 +103,6 @@ module "secrets" {
   environment                    = var.environment
   database_url                   = module.database.connection_url
   redis_url                      = module.redis.connection_url
-  ecs_service_account_email      = module.iam.ecs_service_account_email
-  mock_hss_service_account_email = module.iam.mock_hss_service_account_email
 
   depends_on = [google_project_service.apis]
 }

@@ -20,11 +20,3 @@ variable "redis_url" {
   type      = string
   sensitive = true
 }
-
-variable "ecs_service_account_email" {
-  type = string
-}
-
-variable "mock_hss_service_account_email" {
-  type = string
-}
