@@ -45,14 +45,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   checkov:
-    name: Infrastructure Security
+    name: Infrastructure Security (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [terraform, terraform-devenv]
     steps:
       - uses: actions/checkout@v6
 
       - uses: bridgecrewio/checkov-action@v12
         with:
-          directory: terraform/
+          directory: ${{ matrix.dir }}/
           framework: terraform
           soft_fail: true
           output_format: cli

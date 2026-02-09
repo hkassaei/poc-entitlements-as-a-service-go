@@ -158,8 +158,11 @@ jobs:
         run: npm run test:integration
 
   terraform-validate:
-    name: Terraform Validate
+    name: Terraform Validate (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [terraform, terraform-devenv]
     steps:
       - uses: actions/checkout@v6
 
@@ -169,12 +172,12 @@ jobs:
 
       - name: Check formatting
         run: terraform fmt -check -recursive
-        working-directory: terraform
+        working-directory: ${{ matrix.dir }}
 
       - name: Initialize (no backend)
         run: terraform init -backend=false
-        working-directory: terraform
+        working-directory: ${{ matrix.dir }}
 
       - name: Validate
         run: terraform validate
-        working-directory: terraform
+        working-directory: ${{ matrix.dir }}

@@ -57,7 +57,7 @@ steps:
     args:
       - '-c'
       - |
-        cd terraform
+        cd ${_TERRAFORM_DIR}
         terraform init -backend-config="bucket=${_STATE_BUCKET}"
         terraform apply -auto-approve \
           -var="project_id=${PROJECT_ID}" \
@@ -95,6 +95,7 @@ steps:
 substitutions:
   _REGION: 'us-central1'
   _ARTIFACT_REPO: 'entitlements'
+  _TERRAFORM_DIR: 'terraform'
   _ENVIRONMENT: 'dev'
   _STATE_BUCKET: '${PROJECT_ID}-terraform-state' # Deterministic bucket name
 
