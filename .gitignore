@@ -45,6 +45,9 @@ secrets.json
 *.tfvars
 !terraform.tfvars.example
 
+# AI notes
+.gem-notes-for-Hossein/
+
 # Temporary files
 tmp/
 temp/
