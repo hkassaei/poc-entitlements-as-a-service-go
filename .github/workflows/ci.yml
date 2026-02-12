@@ -12,150 +12,71 @@ concurrency:
 
 jobs:
   build-lint:
-    name: Build & Lint
+    name: Build & Lint (Go)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-go@v5
         with:
-          node-version: 20
-          cache: npm
+          go-version: "1.24"
+          cache: true
 
-      - name: Install ECS dependencies
-        run: npm ci
+      - name: Build all packages
+        run: go build ./...
 
-      - name: Build ECS
-        run: npm run build
+      - name: Vet
+        run: go vet ./...
 
-      - name: Lint ECS
-        run: npm run lint
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
 
-      - name: Install mock-hss dependencies
-        run: npm ci
-        working-directory: mock-hss
-
-      - name: Build mock-hss
-        run: npm run build
-        working-directory: mock-hss
-
-      - name: Lint mock-hss
-        run: npm run lint
-        working-directory: mock-hss
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
 
   unit-tests:
-    name: Unit Tests
+    name: Unit Tests (Go)
     needs: build-lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-go@v5
         with:
-          node-version: 20
-          cache: npm
+          go-version: "1.24"
+          cache: true
 
-      - name: Install ECS dependencies
-        run: npm ci
+      - name: Run tests
+        run: go test ./... -race -count=1
 
-      - name: Build ECS
-        run: npm run build
+      - name: Run tests with coverage
+        run: go test ./... -coverprofile=coverage.out
 
-      - name: Run ECS unit tests
-        run: npm run test:unit
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
 
-      - name: Install mock-hss dependencies
-        run: npm ci
-        working-directory: mock-hss
-
-      - name: Run mock-hss tests
-        run: npm test
-        working-directory: mock-hss
-
-  integration-tests:
-    name: Integration Tests
+  vulnerability-check:
+    name: Vulnerability Check
     needs: build-lint
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: ecs
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: entitlements
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ecs -d entitlements"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      DATABASE_URL: postgresql://ecs:password@localhost:5432/entitlements
-      REDIS_URL: redis://localhost:6379
-      HSS_URL: http://localhost:3001
-      LOCAL_KEK_HEX: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-      NODE_ENV: test
-
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-go@v5
         with:
-          node-version: 20
-          cache: npm
+          go-version: "1.24"
+          cache: true
 
-      - name: Install ECS dependencies
-        run: npm ci
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Build ECS
-        run: npm run build
-
-      - name: Install mock-hss dependencies
-        run: npm ci
-        working-directory: mock-hss
-
-      - name: Build mock-hss
-        run: npm run build
-        working-directory: mock-hss
-
-      - name: Push DB schema
-        run: npx drizzle-kit push --force
-
-      - name: Seed mock-hss subscribers
-        run: node mock-hss/dist/seed.js
-        env:
-          DB_POOL_SIZE: "2"
-
-      - name: Start mock-hss
-        run: |
-          node mock-hss/dist/index.js &
-          # Wait for mock-hss to be ready
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3001/health > /dev/null 2>&1; then
-              echo "mock-hss is ready"
-              break
-            fi
-            sleep 1
-          done
-        env:
-          PORT: "3001"
-          HOST: "0.0.0.0"
-          DB_POOL_SIZE: "2"
-
-      - name: Run integration tests
-        run: npm run test:integration
+      - name: Run govulncheck
+        run: govulncheck ./...
 
   terraform-validate:
     name: Terraform Validate (${{ matrix.dir }})
@@ -164,7 +85,7 @@ jobs:
       matrix:
         dir: [terraform, terraform-devenv]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:

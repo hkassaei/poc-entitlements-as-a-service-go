@@ -8,15 +8,15 @@ The EAP-AKA implementation is tested at five distinct layers, from low-level cry
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Integration Tests (eapAka.integration.test.ts)         │  ← Full HTTP flows
+│  Integration Tests (docker-compose + HTTP flows)        │  ← Full HTTP flows
 ├─────────────────────────────────────────────────────────┤
-│  RFC 4187 Compliance (rfc4187Compliance.test.ts)        │  ← Wire format
+│  RFC 4187 Compliance (rfc4187_test.go)                  │  ← Wire format
 ├─────────────────────────────────────────────────────────┤
-│  EAP Codec (eapCodec.test.ts)                           │  ← Encode/decode
+│  EAP Codec (codec_test.go)                              │  ← Encode/decode
 ├─────────────────────────────────────────────────────────┤
-│  Encryption (eapEncryption.test.ts)                     │  ← AES-128-CBC
+│  Encryption (encryption_test.go)                        │  ← AES-128-CBC
 ├─────────────────────────────────────────────────────────┤
-│  MILENAGE Crypto (milenage.test.ts)                     │  ← 3GPP algorithms
+│  MILENAGE Crypto (milenage_test.go)                     │  ← 3GPP algorithms
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -24,8 +24,7 @@ The EAP-AKA implementation is tested at five distinct layers, from low-level cry
 
 ## Layer 1: MILENAGE Cryptography
 
-**File:** `mock-hss/tests/milenage.test.ts`
-**Tests:** 36
+**File:** `internal/crypto/milenage_test.go`
 **Approach:** Official 3GPP test vectors
 
 ### What We Test
@@ -44,25 +43,26 @@ The MILENAGE algorithm set (3GPP TS 35.206) implements the cryptographic core:
 
 We use **3GPP TS 35.207 official test vectors**. These are the gold standard — if your implementation produces the exact outputs specified in TS 35.207, it will interoperate with any compliant HSS/SIM.
 
-```typescript
+```go
 // 3GPP TS 35.207 Test Set 1
-const ki = Buffer.from('465b5ce8b199b49faa5f0a2ee238a6bc', 'hex');
-const op = Buffer.from('cdc202d5123e20f62b6d676ac72cb318', 'hex');
-const rand = Buffer.from('23553cbe9637a89d218ae64dae47bf35', 'hex');
+ki, _ := hex.DecodeString("465b5ce8b199b49faa5f0a2ee238a6bc")
+op, _ := hex.DecodeString("cdc202d5123e20f62b6d676ac72cb318")
+rand, _ := hex.DecodeString("23553cbe9637a89d218ae64dae47bf35")
+
+vectors := crypto.GenerateVectorsWithRAND(ki, op, rand, sqn, amf)
 
 // Expected outputs from the spec
-expect(vectors.xres.toString('hex')).toBe('a54211d5e3ba50bf');
-expect(vectors.ck.toString('hex')).toBe('b40ba9a3c58b2a05bbf0d987b21bf8cb');
+assert.Equal(t, "a54211d5e3ba50bf", hex.EncodeToString(vectors.XRES))
+assert.Equal(t, "b40ba9a3c58b2a05bbf0d987b21bf8cb", hex.EncodeToString(vectors.CK))
 ```
 
-We test two complete test sets from TS 35.207 plus additional edge cases for the resync functions (f1*, f5*).
+We test two complete test sets from TS 35.207 plus additional edge cases for the resync functions (f1*, f5*) and AUTS generation/validation round-trips.
 
 ---
 
 ## Layer 2: EAP Packet Encryption
 
-**File:** `tests/unit/eapEncryption.test.ts`
-**Tests:** 15
+**File:** `internal/eapaka/encryption_test.go`
 **Approach:** Round-trip verification with known vectors
 
 ### What We Test
@@ -76,13 +76,13 @@ RFC 4187 Section 10.12 specifies AES-128-CBC encryption for AT_ENCR_DATA:
 
 ### How We Test
 
-```typescript
+```go
 // Encrypt inner attributes
-const ciphertext = encryptAttributes(kEncr, iv, innerAttributes);
+ciphertext := eapaka.EncryptAttributes(kEncr, iv, innerAttributes)
 
 // Decrypt and verify round-trip
-const decrypted = decryptAttributes(kEncr, iv, ciphertext);
-expect(decrypted).toEqual(innerAttributes);
+decrypted := eapaka.DecryptAttributes(kEncr, iv, ciphertext)
+assert.Equal(t, innerAttributes, decrypted)
 ```
 
 We verify:
@@ -95,8 +95,7 @@ We verify:
 
 ## Layer 3: EAP Packet Codec
 
-**File:** `tests/unit/eapCodec.test.ts`
-**Tests:** 40+
+**File:** `internal/eapaka/codec_test.go`
 **Approach:** Round-trip encode/decode verification
 
 ### What We Test
@@ -109,24 +108,25 @@ The binary EAP packet format per RFC 3748 and RFC 4187:
 
 ### How We Test
 
-```typescript
+```go
 // Build a packet
-const packet: EapPacket = {
-  code: EAP_CODE.REQUEST,
-  identifier: 42,
-  type: EAP_TYPE_AKA,
-  subtype: AKA_SUBTYPE.CHALLENGE,
-  attributes: [
-    { type: AT.AT_RAND, value: rand },
-    { type: AT.AT_AUTN, value: autn },
-    { type: AT.AT_MAC, value: mac },
-  ],
-};
+packet := eapaka.EapPacket{
+    Code:       config.EAPCodeRequest,
+    Identifier: 42,
+    Subtype:    config.AKASubtypeChallenge,
+    Attributes: []eapaka.EapAttribute{
+        {Type: config.ATRand, Value: rand},
+        {Type: config.ATAutn, Value: autn},
+        {Type: config.ATMac, Value: mac},
+    },
+}
 
 // Encode → Decode → Compare
-const encoded = encodeEapPacket(packet);
-const decoded = decodeEapPacket(encoded);
-expect(decoded).toMatchObject(packet);
+encoded := eapaka.EncodeEapPacket(packet)
+decoded, err := eapaka.DecodeEapPacket(encoded)
+require.NoError(t, err)
+assert.Equal(t, packet.Code, decoded.Code)
+assert.Equal(t, packet.Identifier, decoded.Identifier)
 ```
 
 Every attribute type has dedicated tests verifying:
@@ -139,8 +139,7 @@ Every attribute type has dedicated tests verifying:
 
 ## Layer 4: RFC 4187 Wire Format Compliance
 
-**File:** `tests/unit/rfc4187Compliance.test.ts`
-**Tests:** 38
+**File:** `internal/eapaka/rfc4187_test.go`
 **Approach:** Byte-level verification against RFC specifications
 
 ### What We Test
@@ -166,63 +165,62 @@ This layer verifies **exact byte positions and values** as specified in RFC 4187
 
 **Byte-level assertions:**
 
-```typescript
-it('AKA-Challenge packet has correct byte-level structure', () => {
-  const buf = encodeEapPacket(challengePacket);
+```go
+func TestAKAChallengePacketStructure(t *testing.T) {
+    buf := eapaka.EncodeEapPacket(challengePacket)
 
-  // EAP Header
-  expect(buf[0]).toBe(EAP_CODE.REQUEST);  // Code at byte 0
-  expect(buf[1]).toBe(0x01);              // Identifier at byte 1
-  expect(buf.readUInt16BE(2)).toBe(68);   // Length at bytes 2-3
+    // EAP Header
+    assert.Equal(t, byte(config.EAPCodeRequest), buf[0])  // Code at byte 0
+    assert.Equal(t, byte(0x01), buf[1])                    // Identifier at byte 1
+    assert.Equal(t, uint16(68), binary.BigEndian.Uint16(buf[2:4]))  // Length
 
-  // EAP-AKA Header
-  expect(buf[4]).toBe(EAP_TYPE_AKA);      // Type = 23 at byte 4
-  expect(buf[5]).toBe(AKA_SUBTYPE.CHALLENGE); // Subtype at byte 5
+    // EAP-AKA Header
+    assert.Equal(t, byte(config.EAPTypeAKA), buf[4])       // Type = 23
+    assert.Equal(t, byte(config.AKASubtypeChallenge), buf[5])  // Subtype
 
-  // AT_RAND at offset 8
-  expect(buf[8]).toBe(AT.AT_RAND);        // Type = 1
-  expect(buf[9]).toBe(5);                 // Length = 5 words
-});
+    // AT_RAND at offset 8
+    assert.Equal(t, byte(config.ATRand), buf[8])           // Type = 1
+    assert.Equal(t, byte(5), buf[9])                       // Length = 5 words
+}
 ```
 
 **Key derivation verification:**
 
-```typescript
-it('MK = SHA-1(Identity | IK | CK)', () => {
-  const mk = deriveMasterKey(identity, ik, ck);
+```go
+func TestMKDerivation(t *testing.T) {
+    mk := eapaka.DeriveMasterKey(identity, ik, ck)
 
-  // Verify by computing manually
-  const expected = crypto.createHash('sha1')
-    .update(Buffer.from(identity, 'utf-8'))
-    .update(ik)
-    .update(ck)
-    .digest();
+    // Verify by computing manually
+    h := sha1.New()
+    h.Write([]byte(identity))
+    h.Write(ik)
+    h.Write(ck)
+    expected := h.Sum(nil)
 
-  expect(mk.toString('hex')).toBe(expected.toString('hex'));
-});
+    assert.Equal(t, hex.EncodeToString(expected), hex.EncodeToString(mk))
+}
 ```
 
 **AT_MAC verification:**
 
-```typescript
-it('AT_MAC uses HMAC-SHA-1 truncated to 16 bytes', () => {
-  const mac = computeMac(kAut, packetWithZeroedMac);
+```go
+func TestATMACComputation(t *testing.T) {
+    mac := eapaka.ComputeMAC(kAut, packetWithZeroedMac)
 
-  const fullHmac = crypto.createHmac('sha1', kAut)
-    .update(packetWithZeroedMac)
-    .digest();
+    // HMAC-SHA-1 truncated to 16 bytes
+    h := hmac.New(sha1.New, kAut)
+    h.Write(packetWithZeroedMac)
+    fullHmac := h.Sum(nil)
 
-  expect(mac.toString('hex')).toBe(fullHmac.subarray(0, 16).toString('hex'));
-});
+    assert.Equal(t, hex.EncodeToString(fullHmac[:16]), hex.EncodeToString(mac))
+}
 ```
 
 ---
 
 ## Layer 5: Integration Tests
 
-**File:** `tests/integration/eapAka.integration.test.ts`
-**Tests:** 16
-**Approach:** Full HTTP protocol flows with real services
+**Approach:** Full HTTP protocol flows with Docker Compose services
 
 ### What We Test
 
@@ -230,7 +228,7 @@ Complete EAP-AKA handshakes over HTTP:
 
 1. **Full Authentication Flow**
    - RT1: IMSI → 401 + AKA-Challenge
-   - RT2: EAP-Response → 200 + token
+   - RT2: EAP-Response → 200 + entitlement config
 
 2. **Fast Re-authentication Flow**
    - Re-auth identity → 401 + AKA-Reauthentication
@@ -247,30 +245,19 @@ Complete EAP-AKA handshakes over HTTP:
 
 ### How We Test
 
-```typescript
-it('completes full EAP-AKA authentication', async () => {
-  // RT1: Initial request
-  const rt1 = await app.inject({
-    method: 'POST',
-    url: '/entitlement',
-    payload: { app: 'ap2004', imsi: '001010000000001', ... },
-  });
-  expect(rt1.statusCode).toBe(401);
-  const sessionId = rt1.headers['x-eap-session-id'];
+Integration tests run against Docker Compose services (Postgres, Redis, mock-hss, ecs):
 
-  // Build valid response using MILENAGE
-  const eapResponse = buildValidResponse(rt1.json().eap_relay);
+```bash
+# Start services
+make docker-up
 
-  // RT2: Complete auth
-  const rt2 = await app.inject({
-    method: 'POST',
-    url: '/entitlement',
-    headers: { 'X-EAP-Session-Id': sessionId },
-    payload: { app: 'ap2004', eap_relay: eapResponse, ... },
-  });
-  expect(rt2.statusCode).toBe(200);
-  expect(rt2.json().token).toBeDefined();
-});
+# Run integration tests (once available)
+go test ./tests/integration/... -count=1
+
+# Or test manually with curl
+curl -X POST http://localhost:8443/entitlement \
+  -H "Content-Type: application/json" \
+  -d '{"app":"ap2004","imsi":"001010000000001","terminal_id":"test"}'
 ```
 
 ---
@@ -279,9 +266,9 @@ it('completes full EAP-AKA authentication', async () => {
 
 | Source | What It Provides | Used In |
 |--------|------------------|---------|
-| 3GPP TS 35.207 | MILENAGE test vectors (Ki, OP, RAND → XRES, CK, IK, AK) | `milenage.test.ts` |
-| RFC 4187 | Protocol format specifications | `rfc4187Compliance.test.ts` |
-| RFC 3748 | EAP base protocol format | `eapCodec.test.ts` |
+| 3GPP TS 35.207 | MILENAGE test vectors (Ki, OP, RAND → XRES, CK, IK, AK) | `milenage_test.go` |
+| RFC 4187 | Protocol format specifications | `rfc4187_test.go` |
+| RFC 3748 | EAP base protocol format | `codec_test.go` |
 | Custom | Derived vectors for edge cases | All test files |
 
 ---
@@ -290,15 +277,25 @@ it('completes full EAP-AKA authentication', async () => {
 
 ```bash
 # All tests
-npm test
+go test ./... -count=1
 
-# Specific layer
-npm test -- tests/unit/rfc4187Compliance.test.ts
-npm test -- tests/unit/eapCodec.test.ts
-npm test -- tests/integration/eapAka.integration.test.ts
+# With race detector
+go test ./... -race -count=1
 
-# Mock HSS tests (MILENAGE)
-cd mock-hss && npm test
+# Specific package
+go test ./internal/crypto/... -v
+go test ./internal/eapaka/... -v
+go test ./internal/services/... -v
+go test ./internal/protocol/... -v
+
+# With coverage
+go test ./... -coverprofile=coverage.out
+go tool cover -html=coverage.out -o coverage.html
+
+# Or via Makefile
+make test
+make test-race
+make test-cover
 ```
 
 ---
@@ -326,10 +323,10 @@ make eapol_test
 
 Export encoded packets and verify parsing in Wireshark:
 
-```typescript
+```go
 // Dump packet bytes for Wireshark
-const packet = encodeEapPacket(challengePacket);
-console.log(packet.toString('hex'));
+packet := eapaka.EncodeEapPacket(challengePacket)
+fmt.Println(hex.EncodeToString(packet))
 // Load in Wireshark: File → Import from Hex Dump
 ```
 
@@ -337,18 +334,16 @@ Wireshark has a built-in EAP-AKA dissector that will show all fields.
 
 ### 3. Fuzz Testing
 
-Generate malformed packets to test decoder robustness:
+Go has built-in fuzz testing support:
 
-```typescript
-// Truncated packets
-decodeEapPacket(validPacket.subarray(0, 10));
-
-// Invalid length fields
-validPacket[1] = 0xff; // Bogus length
-decodeEapPacket(validPacket);
-
-// Unknown attribute types
-// ... etc
+```go
+func FuzzDecodeEapPacket(f *testing.F) {
+    f.Add(validPacketBytes)
+    f.Fuzz(func(t *testing.T, data []byte) {
+        // Should not panic on any input
+        _, _ = eapaka.DecodeEapPacket(data)
+    })
+}
 ```
 
 ### 4. Interoperability with Real SIMs
@@ -363,13 +358,16 @@ For ultimate validation, test with actual SIM cards:
 
 ## Test Coverage Summary
 
-| Layer | File | Tests | Confidence |
-|-------|------|-------|------------|
-| MILENAGE | `milenage.test.ts` | 36 | **High** — 3GPP official vectors |
-| Encryption | `eapEncryption.test.ts` | 15 | **High** — Round-trip + tampering |
-| Codec | `eapCodec.test.ts` | 40+ | **High** — All attribute types |
-| RFC 4187 | `rfc4187Compliance.test.ts` | 38 | **High** — Byte-level verification |
-| Integration | `eapAka.integration.test.ts` | 16 | **High** — Full protocol flows |
-| **Total** | | **246** | |
+| Layer | File | Confidence |
+|-------|------|------------|
+| MILENAGE | `internal/crypto/milenage_test.go` | **High** — 3GPP official vectors |
+| Envelope Encryption | `internal/crypto/envelope_test.go` | **High** — Round-trip + key validation |
+| KMS | `internal/crypto/kms_test.go` | **High** — Local key manager tests |
+| Encryption | `internal/eapaka/encryption_test.go` | **High** — Round-trip + tampering |
+| Codec | `internal/eapaka/codec_test.go` | **High** — All attribute types |
+| Key Derivation | `internal/eapaka/keys_test.go` | **High** — MK, PRF, MAC verification |
+| RFC 4187 | `internal/eapaka/rfc4187_test.go` | **High** — Byte-level verification |
+| Protocol Builders | `internal/protocol/*_test.go` | **High** — JSON + XML output |
+| Service Handlers | `internal/services/services_test.go` | **High** — All 12 handlers, 55 tests |
 
-The combination of official test vectors, byte-level compliance tests, and full integration flows provides high confidence that the implementation correctly follows RFC 4187.
+The combination of official test vectors, byte-level compliance tests, and comprehensive service handler tests provides high confidence that the implementation correctly follows RFC 4187 and GSMA TS.43.

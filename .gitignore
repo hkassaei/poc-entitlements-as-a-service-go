@@ -1,6 +1,7 @@
 # Build output
-node_modules/
-dist/
+bin/
+coverage.out
+coverage.html
 
 # Environment files
 .env
@@ -44,6 +45,9 @@ secrets.json
 .terraform/
 *.tfvars
 !terraform.tfvars.example
+
+# AI notes
+.gem-notes-for-Hossein/
 
 # Temporary files
 tmp/

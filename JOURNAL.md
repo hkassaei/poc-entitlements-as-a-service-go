@@ -58,6 +58,39 @@
 - **`terraform fmt -recursive`** — Terraform files drift from canonical formatting over time. Run `fmt` before committing or add it as a CI gate.
 - See [cicd-learnings.md](cicd-learnings.md) for detailed notes.
 
+## Go Re-implementation
+- **Stack**: chi router + pgx/v5 raw SQL + go-redis/v9 + log/slog + stdlib crypto
+- **No GORM**: 10 fixed queries with heavy bytea/jsonb — raw SQL with pgx gives full control, no reflection overhead
+- **Protocol-identical**: same wire-format EAP packets, same Redis key patterns, same API contract, same DB schema as TypeScript
+- **Struct-based DI**: no globals, no DI framework — `cmd/main.go` constructs the full dependency graph
+- **Context propagation**: every I/O function takes `context.Context` as first param, flowing from `r.Context()`
+- **Docker**: multi-stage builds → `gcr.io/distroless/static-debian12:nonroot` (minimal attack surface, ~15MB images)
+- **CI**: `go build`, `go test -race`, `go vet`, `gofmt -l`, `golangci-lint`, `govulncheck`
+
+### Go-Specific Gotchas
+- **`CreateKeyManager` returns 2 values** — `KeyManager` + `error`. Easy to forget the error return when calling from `main.go`
+- **Go exported field naming**: `SqnMs` not `SQNMS` — Go convention is CamelCase even for acronyms in the middle of a name
+- **Pointer types for optional DB fields**: `*string`, `*int` instead of TypeScript's optional chaining
+- **`gofmt` formatting drift**: 7 files needed formatting fixes after initial write — always run `gofmt -s -w .` and add `gofmt -l` check to CI
+- **Buffer translation**: `binary.BigEndian.Uint16()` replaces `buf.readUInt16BE()`, `hex.DecodeString()` replaces `Buffer.from(hex,'hex')`
+- **`defer crypto.ZeroSlice(dek)`** — cleaner than TypeScript try/finally for zeroing secrets
+- **`encoding/hex` needed in mock-hss main.go** — `cfg.LocalKEKHex` is a string, `CreateKeyManager` expects `[]byte`, must decode hex first
+
+### Go File Locations
+- ECS entry point: `cmd/ecs/main.go`
+- Mock HSS entry point: `cmd/mock-hss/main.go`
+- Config + constants: `internal/config/`
+- MILENAGE + envelope encryption + KMS: `internal/crypto/`
+- EAP-AKA protocol (codec, keys, encryption, orchestrator, re-auth, sessions): `internal/eapaka/`
+- Database (pgx, Redis, models, queries, migrate, seed): `internal/db/`
+- Token service: `internal/token/service.go`
+- TS.43 response builders: `internal/protocol/`
+- 12 service handlers: `internal/services/`
+- HTTP server + middleware: `internal/server/`
+- Schema DDL: `sql/schema.sql`
+- Go Docker configs: `Dockerfile.ecs`, `Dockerfile.mock-hss`, `docker-compose.go.yml`
+- Go CI: `.github/workflows/ci.yml`, `.github/workflows/security.yml`
+
 ## Production TODO
 - **KMS KeyRing: switch to static name + `prevent_destroy = true`** — dev/staging uses random suffix for easy destroy+recreate, but production must use a fixed name (`entitlement-keys`) with `prevent_destroy` on both the KeyRing and CryptoKey. A random Terraform glitch must never orphan the encryption key that protects the subscriber Ki database.
 

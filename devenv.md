@@ -3,7 +3,7 @@
 Sandboxed Architecture Summary
    1. VPC: Create with a "Private Google Access" enabled subnet. Private Google Access allows Cloud Run services and VMs to reach Google APIs (like Artifact Registry to pull images, or Secret Manager to fetch DB credentials), databases, etc. without a public internet connection.
    2. Internal Load Balancer: Replaces Global External Application Load Balancer and receives traffic on a private internal IP.
-   3. Cloud Run (ECS): Sits behind a Serverless NEG. Uses a VPC Connector to reach the DB.
+   3. Cloud Run (ECS): Sits behind a Serverless NEG. Uses Direct VPC Egress to reach the DB.
    4. Database/Redis: Hosted on private IPs (Cloud SQL Auth Proxy or Direct IP).
    5. Test VM: Acts as the device, sending traffic to the ILB within the VPC.
 
@@ -38,7 +38,7 @@ To deploy in a strictly sandboxed, private GCP environment with no external conn
   This is the most flexible approach for a Dev environment.
    * Setup: Deploy a small Linux VM (Compute Engine) in the same VPC.
    * Role: This VM acts as the "User Equipment" (UE).
-   * Usage: You deploy your integration test scripts (npm run test:integration) or load testing tools (like k6 or Locust) onto this VM.
+   * Usage: You deploy your integration test scripts or load testing tools (like k6 or Locust) onto this VM.
    * Workflow: The VM runs a script -> Sends HTTP requests to the Internal LB IP -> ECS Service.
 
 
@@ -60,7 +60,7 @@ To deploy in a strictly sandboxed, private GCP environment with no external conn
    * How it works: You enable IAP on the "Mock Device" VM (Option A above).
    * Usage: You run a command like gcloud compute ssh mock-device --tunnel-through-iap.
    * Result: You get a secure SSH shell into the VPC. From inside that shell, you can curl your Internal LB or run your tests manually. You can even set up port forwarding to access the
-     Swagger UI/API from your local browser (e.g., gcloud compute ssh -- -L 8080:INTERNAL_LB_IP:80).
+     API from your local browser (e.g., gcloud compute ssh -- -L 8080:INTERNAL_LB_IP:80).
 
 
   4. **Supporting Services (The "Plumbing")**
@@ -87,9 +87,9 @@ graph LR
         end
 
         subgraph Application_Layer
-            ILB -->|Serverless NEG| ECS[Cloud Run: Entitlement Server]
-            ECS -->|VPC Connector| DB[(Cloud SQL)]
-            ECS -->|VPC Connector| Redis[(Memorystore)]
+            ILB -->|Serverless NEG| ECS[Cloud Run: ECS - Go]
+            ECS -->|Direct VPC Egress| DB[(Cloud SQL)]
+            ECS -->|Direct VPC Egress| Redis[(Memorystore)]
         end
     end
 ```
@@ -109,50 +109,9 @@ graph LR
 # Execution of the plan
  > yes it aligns with my sandbox environment constraints. So create a new directory named terraform-devenv, adapt the existing terraform modules and align them with this plan and create a
    new set of terraform modules in the newly created directory. Do not alter or delete anything in the existing terraform directory.
-✦ I'll start by clarifying the concepts and answering your planning questions, then I will proceed to create the development environment configuration as requested.
-
-  1. Concepts & Planning
-
-
-  Is VPC Connector the same as Private Google Access (PGA)?
-  No. They serve opposite directions of connectivity, and in a sandbox environment, you typically need both:
-   * VPC Connector (Serverless VPC Access): Allows your Cloud Run service to reach resources inside your VPC (like your private Cloud SQL and Redis). Without this, Cloud Run cannot "see"
-     into the private network.
-   * Private Google Access (PGA): Allows resources inside your VPC (like the simulation VM we'll create) to reach Google APIs (like Artifact Registry to pull images, or Secret Manager)
-     without having a public IP address or internet access.
-
-
-  How to replace Global Load Balancer (GLB)?
-  In a private sandbox, you should use an Internal Application Load Balancer (L7 ILB).
-   * Why: It sits entirely inside your VPC (specifically in a "proxy-only" subnet). It provides a private IP address that is only accessible from within the VPC. It supports standard
-     HTTP/HTTPS features just like the external GLB.
-
-
-  How to simulate devices?
-  Since you have no external connectivity, you cannot use your laptop or public internet tools.
-   * Solution: We will provision a "Jump Host" (Compute Engine VM) inside the specific terraform-devenv VPC.
-   * Access: You will access this VM using IAP (Identity-Aware Proxy). This allows you to SSH into the VM safely from the Google Cloud Console or gcloud CLI without the VM needing a public
-     IP address.
-   * Simulation: Once SSH'd into the VM, you can run curl, h2load, or your integration tests against the Internal Load Balancer's private IP.
-
-  ---
-
-  2. Implementation: terraform-devenv
-
-  I will now create the isolated development environment configuration. This involves copying the existing modules and adapting them for a "private-only" architecture.
-
-
-  Changes I am making in `terraform-devenv`:
-   1. Networking: Adding a proxy-only-subnet (required for Internal LB) and an IAP Firewall rule (to allow you to SSH into the simulation VM).
-   2. Load Balancer: rewriting the module to use google_compute_region_backend_service (Internal) instead of the global external one.
-   3. Cloud Run: Restricting ingress to internal-and-cloud-load-balancing.
-   4. Cloud Armor: Removing this entirely (not supported/needed on Internal LBs).
-   5. Simulation: Adding a standard Compute Engine VM ("device-simulator") with no public IP.
-
-  I'll start by creating the directory and duplicating the existing configuration.
 
 ---
-# IAM roles 
+# IAM roles
 
  To initialize this specific terraform-devenv environment, your user account (or the CI/CD service account running Terraform) requires the following permissions.
 
@@ -171,7 +130,7 @@ graph LR
    * `roles/run.admin`: To deploy the Cloud Run services (ECS and Mock HSS).
    * `roles/compute.instanceAdmin.v1`: To create the "device-simulator" VM.
    * `roles/iam.serviceAccountUser`: Critical. This allows Terraform to attach Service Accounts to the Cloud Run services and the VM. Without this, deployment will fail with a permission
-     error when trying to assign identity.
+     error when trying to attach identity.
 
 
   3. Identity & Security
@@ -188,7 +147,7 @@ graph LR
 
 
   5. Terraform State Access
-   * `roles/storage.objectAdmin`: Read/Write access to the GCS bucket defined in your backend "gcs" block (REPLACE_WITH_YOUR_TERRAFORM_STATE_BUCKET).
+   * `roles/storage.objectAdmin`: Read/Write access to the GCS bucket defined in your backend "gcs" block.
 
   ---
 
@@ -232,6 +191,8 @@ graph LR
   │ Secrets           │ Default replication                         │ User-managed replication across two Canadian regions (Montreal + Toronto)      │
   ├───────────────────┼─────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
   │ Testing           │ N/A                                         │ Device simulator VM (e2-micro, Debian, IAP SSH access, no public IP)           │
+  ├───────────────────┼─────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ Container images  │ Go multi-stage → distroless (~15MB)         │ Same images, same Dockerfiles                                                  │
   ├───────────────────┼─────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
   │ State prefix      │ terraform/state                             │ terraform/devenv-state                                                         │
   └───────────────────┴─────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘

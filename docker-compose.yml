@@ -26,7 +26,9 @@ services:
       retries: 5
 
   mock-hss:
-    build: ./mock-hss
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-hss
     ports:
       - "3001:3001"
     environment:
@@ -35,13 +37,14 @@ services:
       DATABASE_URL: "postgresql://ecs:password@postgres:5432/entitlements"
       DB_POOL_SIZE: "5"
       LOCAL_KEK_HEX: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-      NODE_ENV: "development"
     depends_on:
       postgres:
         condition: service_healthy
 
   ecs:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.ecs
     ports:
       - "8443:8443"
     environment:
@@ -51,7 +54,6 @@ services:
       DB_POOL_SIZE: "5"
       REDIS_URL: "redis://redis:6379"
       HSS_URL: "http://mock-hss:3001"
-      NODE_ENV: "development"
       SUPPORTED_VERSIONS: "2,4"
       OPERATOR_MCC: "001"
       OPERATOR_MNC: "01"
