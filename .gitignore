@@ -1,6 +1,7 @@
 # Build output
-node_modules/
-dist/
+bin/
+coverage.out
+coverage.html
 
 # Environment files
 .env

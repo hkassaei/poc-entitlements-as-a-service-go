@@ -1,0 +1,24 @@
+# Multi-stage build for Mock HSS server
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /app
+
+# Cache dependency downloads
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source and build
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY sql/ ./sql/
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /mock-hss ./cmd/mock-hss
+
+# Runtime image — distroless for minimal attack surface
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /mock-hss /mock-hss
+
+EXPOSE 3001
+
+ENTRYPOINT ["/mock-hss"]

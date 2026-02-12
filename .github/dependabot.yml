@@ -1,23 +1,9 @@
 version: 2
 
 updates:
-  # ECS npm dependencies
-  - package-ecosystem: npm
+  # Go module dependencies
+  - package-ecosystem: gomod
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-    groups:
-      minor-and-patch:
-        update-types:
-          - minor
-          - patch
-
-  # Mock-HSS npm dependencies
-  - package-ecosystem: npm
-    directory: /mock-hss
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
