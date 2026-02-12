@@ -14,7 +14,6 @@ var (
 	c2 = [16]byte{15: 0x01}
 	c3 = [16]byte{15: 0x02}
 	c4 = [16]byte{15: 0x04}
-	c5 = [16]byte{15: 0x08}
 
 	// Resync constants
 	c1Star = [16]byte{15: 0x80}

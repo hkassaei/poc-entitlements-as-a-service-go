@@ -51,7 +51,7 @@ func main() {
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
 	// POST /vectors — generate authentication vectors
@@ -68,7 +68,7 @@ func main() {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
 			return
 		}
 
@@ -116,7 +116,7 @@ func main() {
 		_ = queries.UpdateSubscriberSQN(r.Context(), sub.IMSI, sub.SQN+1)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"rand": base64.StdEncoding.EncodeToString(vectors.RAND),
 			"autn": base64.StdEncoding.EncodeToString(vectors.AUTN),
 			"xres": base64.StdEncoding.EncodeToString(vectors.XRES),
@@ -141,7 +141,7 @@ func main() {
 		if err != nil || len(randBytes) != 16 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "RAND must be 16 bytes"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "RAND must be 16 bytes"})
 			return
 		}
 
@@ -149,7 +149,7 @@ func main() {
 		if err != nil || len(autsBytes) != 14 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "AUTS must be 14 bytes"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "AUTS must be 14 bytes"})
 			return
 		}
 
@@ -157,7 +157,7 @@ func main() {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
 			return
 		}
 
@@ -187,7 +187,7 @@ func main() {
 		if !result.Valid {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "AUTS validation failed"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "AUTS validation failed"})
 			return
 		}
 
@@ -211,7 +211,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"rand": base64.StdEncoding.EncodeToString(vectors.RAND),
 			"autn": base64.StdEncoding.EncodeToString(vectors.AUTN),
 			"xres": base64.StdEncoding.EncodeToString(vectors.XRES),
@@ -235,7 +235,9 @@ func main() {
 		slog.Info("Shutting down mock-hss")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Shutdown error", "err", err)
+		}
 	}()
 
 	slog.Info("Mock HSS starting", "addr", addr)

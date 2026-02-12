@@ -105,7 +105,7 @@ func (h *EntitlementHandler) handleEapRelayPath(ctx context.Context, w http.Resp
 		slog.Info("Returning cached EAP response", "sessionId", sessionID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(cached)
+		_, _ = w.Write(cached)
 		return
 	}
 

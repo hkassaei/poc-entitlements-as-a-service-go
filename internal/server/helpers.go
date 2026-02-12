@@ -8,13 +8,13 @@ import (
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeXML(w http.ResponseWriter, status int, xmlStr string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
-	w.Write([]byte(xmlStr))
+	_, _ = w.Write([]byte(xmlStr))
 }
 
 func clientIP(r *http.Request) string {
