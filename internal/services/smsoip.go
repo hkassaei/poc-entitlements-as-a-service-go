@@ -9,7 +9,7 @@ type SmsOipConfigData struct {
 	Addresses []protocol.AddressConfig `json:"addresses,omitempty"`
 }
 
-var defaultSmsOipAddresses = []protocol.AddressConfig{
+var _defaultSmsOipAddresses = []protocol.AddressConfig{
 	{AddrType: "1", Addr: "smsc.operator.com"},
 }
 
@@ -31,7 +31,7 @@ func BuildSmsOipConfig(status, provStatus, tcStatus int, configData *SmsOipConfi
 		if len(configData.Addresses) > 0 {
 			result.Addresses = configData.Addresses
 		} else {
-			result.Addresses = defaultSmsOipAddresses
+			result.Addresses = _defaultSmsOipAddresses
 		}
 	} else {
 		result.AddrStatus = protocol.IntPtr(0)

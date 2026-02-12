@@ -2,14 +2,14 @@ package services
 
 // ActivationCodeResponse holds a canned eSIM activation code.
 type ActivationCodeResponse struct {
-	ActivationCode string
-	ICCID          string
-	SMDPAddress    string
-	ProfileType    string
-	MatchingID     string
+	ActivationCode string `json:"activationCode"`
+	ICCID          string `json:"iccid"`
+	SMDPAddress    string `json:"smdpAddress"`
+	ProfileType    string `json:"profileType"`
+	MatchingID     string `json:"matchingId"`
 }
 
-var profiles = map[string]ActivationCodeResponse{
+var _profiles = map[string]ActivationCodeResponse{
 	"default": {
 		ActivationCode: "1$smdp.operator.com$POSTPAID-001",
 		ICCID:          "8901010000000000001",
@@ -36,16 +36,16 @@ var profiles = map[string]ActivationCodeResponse{
 // GetActivationCode returns an activation code for a profile key.
 // Falls back to the "default" profile if the key is unknown.
 func GetActivationCode(profileKey string) ActivationCodeResponse {
-	if p, ok := profiles[profileKey]; ok {
+	if p, ok := _profiles[profileKey]; ok {
 		return p
 	}
-	return profiles["default"]
+	return _profiles["default"]
 }
 
 // ListAvailableProfiles returns all canned profiles.
 func ListAvailableProfiles() []ActivationCodeResponse {
-	result := make([]ActivationCodeResponse, 0, len(profiles))
-	for _, p := range profiles {
+	result := make([]ActivationCodeResponse, 0, len(_profiles))
+	for _, p := range _profiles {
 		result = append(result, p)
 	}
 	return result

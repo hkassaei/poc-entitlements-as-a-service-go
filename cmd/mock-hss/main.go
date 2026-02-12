@@ -51,7 +51,7 @@ func main() {
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
 	// POST /vectors — generate authentication vectors
@@ -68,7 +68,7 @@ func main() {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
 			return
 		}
 
@@ -105,13 +105,18 @@ func main() {
 		// AMF: 0x8000 (separation bit set for LTE/5G)
 		amf := []byte{0x80, 0x00}
 
-		vectors := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		vectors, err := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		if err != nil {
+			slog.Error("Failed to generate vectors", "err", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
 
 		// Increment SQN
 		_ = queries.UpdateSubscriberSQN(r.Context(), sub.IMSI, sub.SQN+1)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"rand": base64.StdEncoding.EncodeToString(vectors.RAND),
 			"autn": base64.StdEncoding.EncodeToString(vectors.AUTN),
 			"xres": base64.StdEncoding.EncodeToString(vectors.XRES),
@@ -136,7 +141,7 @@ func main() {
 		if err != nil || len(randBytes) != 16 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "RAND must be 16 bytes"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "RAND must be 16 bytes"})
 			return
 		}
 
@@ -144,7 +149,7 @@ func main() {
 		if err != nil || len(autsBytes) != 14 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "AUTS must be 14 bytes"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "AUTS must be 14 bytes"})
 			return
 		}
 
@@ -152,7 +157,7 @@ func main() {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Subscriber not found"})
 			return
 		}
 
@@ -182,7 +187,7 @@ func main() {
 		if !result.Valid {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "AUTS validation failed"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "AUTS validation failed"})
 			return
 		}
 
@@ -198,10 +203,15 @@ func main() {
 		binary.BigEndian.PutUint32(sqnBuf[2:6], uint32(newSQN))
 
 		amf := []byte{0x80, 0x00}
-		vectors := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		vectors, err := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		if err != nil {
+			slog.Error("Failed to generate vectors", "err", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"rand": base64.StdEncoding.EncodeToString(vectors.RAND),
 			"autn": base64.StdEncoding.EncodeToString(vectors.AUTN),
 			"xres": base64.StdEncoding.EncodeToString(vectors.XRES),
@@ -225,7 +235,9 @@ func main() {
 		slog.Info("Shutting down mock-hss")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Shutdown error", "err", err)
+		}
 	}()
 
 	slog.Info("Mock HSS starting", "addr", addr)

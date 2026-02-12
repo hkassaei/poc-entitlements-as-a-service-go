@@ -105,7 +105,7 @@ func (h *EntitlementHandler) handleEapRelayPath(ctx context.Context, w http.Resp
 		slog.Info("Returning cached EAP response", "sessionId", sessionID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(cached)
+		_, _ = w.Write(cached)
 		return
 	}
 
@@ -217,7 +217,7 @@ func (h *EntitlementHandler) handleTokenPath(ctx context.Context, w http.Respons
 
 	// Path 2b: ODSA temporary token
 	tokenInfo, err := h.tokenService.ValidateToken(ctx, body.Token)
-	if err != nil || tokenInfo == nil {
+	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "Unauthorized", "message": "Invalid or expired token", "statusCode": 401,
 		})
@@ -311,7 +311,7 @@ func (h *EntitlementHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Fall back to ODSA temporary token
 	tokenInfo, err := h.tokenService.ValidateToken(ctx, tokenVal)
-	if err != nil || tokenInfo == nil {
+	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "Unauthorized", "message": "Invalid or expired token", "statusCode": 401,
 		})

@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
+	"fmt"
 
 	"github.com/hkassaei/poc-entitlements-as-a-service-go/internal/config"
 )
@@ -12,9 +13,9 @@ import (
 // 1. Serialize inner attributes via EncodeAttribute()
 // 2. Append AT_PADDING if total isn't 16-byte aligned
 // 3. AES-128-CBC encrypt with no auto-padding
-func EncryptAttributes(kEncr, iv []byte, innerAttributes []EapAttribute) []byte {
+func EncryptAttributes(kEncr, iv []byte, innerAttributes []EapAttribute) ([]byte, error) {
 	// Serialize inner attributes
-	var plaintext []byte
+	plaintext := make([]byte, 0, len(innerAttributes)*20)
 	for _, attr := range innerAttributes {
 		plaintext = append(plaintext, EncodeAttribute(attr)...)
 	}
@@ -32,21 +33,21 @@ func EncryptAttributes(kEncr, iv []byte, innerAttributes []EapAttribute) []byte 
 
 	block, err := aes.NewCipher(kEncr)
 	if err != nil {
-		panic("aes.NewCipher: " + err.Error())
+		return nil, fmt.Errorf("aes.NewCipher: %w", err)
 	}
 
 	ciphertext := make([]byte, len(plaintext))
 	mode := cipher.NewCBCEncrypter(block, iv)
 	mode.CryptBlocks(ciphertext, plaintext)
-	return ciphertext
+	return ciphertext, nil
 }
 
 // DecryptAttributes decrypts AT_ENCR_DATA ciphertext and parses inner attributes.
 // Strips AT_PADDING from the result.
-func DecryptAttributes(kEncr, iv, ciphertext []byte) []EapAttribute {
+func DecryptAttributes(kEncr, iv, ciphertext []byte) ([]EapAttribute, error) {
 	block, err := aes.NewCipher(kEncr)
 	if err != nil {
-		panic("aes.NewCipher: " + err.Error())
+		return nil, fmt.Errorf("aes.NewCipher: %w", err)
 	}
 
 	plaintext := make([]byte, len(ciphertext))
@@ -102,5 +103,5 @@ func DecryptAttributes(kEncr, iv, ciphertext []byte) []EapAttribute {
 		offset += totalBytes
 	}
 
-	return attributes
+	return attributes, nil
 }

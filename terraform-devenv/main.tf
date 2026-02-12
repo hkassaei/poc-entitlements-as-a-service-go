@@ -97,12 +97,12 @@ module "kms" {
 }
 
 module "secrets" {
-  source                         = "./modules/secrets"
-  project_id                     = var.project_id
-  region                         = var.region
-  environment                    = var.environment
-  database_url                   = module.database.connection_url
-  redis_url                      = module.redis.connection_url
+  source       = "./modules/secrets"
+  project_id   = var.project_id
+  region       = var.region
+  environment  = var.environment
+  database_url = module.database.connection_url
+  redis_url    = module.redis.connection_url
 
   depends_on = [google_project_service.apis]
 }

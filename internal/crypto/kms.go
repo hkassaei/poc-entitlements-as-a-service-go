@@ -11,6 +11,12 @@ type KeyManager interface {
 	UnwrapDEK(ctx context.Context, wrappedDEK []byte) ([]byte, error)
 }
 
+// Compile-time interface compliance checks.
+var (
+	_ KeyManager = (*LocalKeyManager)(nil)
+	_ KeyManager = (*CloudKMSKeyManager)(nil)
+)
+
 // LocalKeyManager uses a KEK from environment (dev only).
 type LocalKeyManager struct {
 	kek []byte

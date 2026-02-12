@@ -19,14 +19,14 @@ type ParsedUserAgent struct {
 }
 
 // TS.43 User-Agent format: PRD-TS43/<version> (<vendor>; <model>; <client_type>; <OS>)
-var uaPattern = regexp.MustCompile(`^PRD-TS43/(\S+)\s+\(([^;]+);\s*([^;]+);\s*([^;]+);\s*([^)]+)\)$`)
+var _uaPattern = regexp.MustCompile(`^PRD-TS43/(\S+)\s+\(([^;]+);\s*([^;]+);\s*([^;]+);\s*([^)]+)\)$`)
 
 // UserAgentParser middleware parses the TS.43 User-Agent header.
 func UserAgentParser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ua := r.Header.Get("User-Agent")
 		if ua != "" {
-			match := uaPattern.FindStringSubmatch(ua)
+			match := _uaPattern.FindStringSubmatch(ua)
 			if match != nil {
 				parsed := &ParsedUserAgent{
 					Version:    match[1],
