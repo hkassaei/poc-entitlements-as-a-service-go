@@ -24,11 +24,13 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 			{Type: config.ATCounter, Value: counterBuf},
 		}
 
-		ciphertext := EncryptAttributes(kEncr, iv, innerAttrs)
+		ciphertext, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
 		assert.Greater(t, len(ciphertext), 0)
 		assert.Equal(t, 0, len(ciphertext)%16) // AES block-aligned
 
-		decrypted := DecryptAttributes(kEncr, iv, ciphertext)
+		decrypted, err := DecryptAttributes(kEncr, iv, ciphertext)
+		require.NoError(t, err)
 		require.Len(t, decrypted, 1)
 		assert.Equal(t, config.ATCounter, decrypted[0].Type)
 		assert.Equal(t, uint16(42), binary.BigEndian.Uint16(decrypted[0].Value))
@@ -47,8 +49,10 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 			{Type: config.ATNextReauthID, Value: []byte(nextReauthID)},
 		}
 
-		ciphertext := EncryptAttributes(kEncr, iv, innerAttrs)
-		decrypted := DecryptAttributes(kEncr, iv, ciphertext)
+		ciphertext, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
+		decrypted, err := DecryptAttributes(kEncr, iv, ciphertext)
+		require.NoError(t, err)
 
 		require.Len(t, decrypted, 3)
 
@@ -71,8 +75,10 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 
 		iv2 := make([]byte, 16)
 		_, _ = rand.Read(iv2)
-		ct1 := EncryptAttributes(kEncr, iv, innerAttrs)
-		ct2 := EncryptAttributes(kEncr, iv2, innerAttrs)
+		ct1, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
+		ct2, err := EncryptAttributes(kEncr, iv2, innerAttrs)
+		require.NoError(t, err)
 		assert.NotEqual(t, ct1, ct2)
 	})
 
@@ -85,8 +91,10 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 
 		kEncr2 := make([]byte, 16)
 		_, _ = rand.Read(kEncr2)
-		ct1 := EncryptAttributes(kEncr, iv, innerAttrs)
-		ct2 := EncryptAttributes(kEncr2, iv, innerAttrs)
+		ct1, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
+		ct2, err := EncryptAttributes(kEncr2, iv, innerAttrs)
+		require.NoError(t, err)
 		assert.NotEqual(t, ct1, ct2)
 	})
 
@@ -96,7 +104,8 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 			{Type: config.ATNextReauthID, Value: []byte(nextReauthID)},
 		}
 
-		ciphertext := EncryptAttributes(kEncr, iv, innerAttrs)
+		ciphertext, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
 		assert.Equal(t, 0, len(ciphertext)%16)
 	})
 
@@ -106,8 +115,10 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 			{Type: config.ATNextReauthID, Value: []byte(nextReauthID)},
 		}
 
-		ciphertext := EncryptAttributes(kEncr, iv, innerAttrs)
-		decrypted := DecryptAttributes(kEncr, iv, ciphertext)
+		ciphertext, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
+		decrypted, err := DecryptAttributes(kEncr, iv, ciphertext)
+		require.NoError(t, err)
 
 		// Should not contain AT_PADDING
 		for _, attr := range decrypted {
@@ -128,8 +139,10 @@ func TestEncryptDecryptAttributes(t *testing.T) {
 			{Type: config.ATCounterTooSmall, Value: []byte{}},
 		}
 
-		ciphertext := EncryptAttributes(kEncr, iv, innerAttrs)
-		decrypted := DecryptAttributes(kEncr, iv, ciphertext)
+		ciphertext, err := EncryptAttributes(kEncr, iv, innerAttrs)
+		require.NoError(t, err)
+		decrypted, err := DecryptAttributes(kEncr, iv, ciphertext)
+		require.NoError(t, err)
 
 		require.Len(t, decrypted, 2)
 		assert.Equal(t, config.ATCounter, decrypted[0].Type)

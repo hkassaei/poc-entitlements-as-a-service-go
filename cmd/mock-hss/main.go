@@ -105,7 +105,12 @@ func main() {
 		// AMF: 0x8000 (separation bit set for LTE/5G)
 		amf := []byte{0x80, 0x00}
 
-		vectors := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		vectors, err := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		if err != nil {
+			slog.Error("Failed to generate vectors", "err", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
 
 		// Increment SQN
 		_ = queries.UpdateSubscriberSQN(r.Context(), sub.IMSI, sub.SQN+1)
@@ -198,7 +203,12 @@ func main() {
 		binary.BigEndian.PutUint32(sqnBuf[2:6], uint32(newSQN))
 
 		amf := []byte{0x80, 0x00}
-		vectors := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		vectors, err := crypto.GenerateVectors(ki, op, sqnBuf, amf)
+		if err != nil {
+			slog.Error("Failed to generate vectors", "err", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{

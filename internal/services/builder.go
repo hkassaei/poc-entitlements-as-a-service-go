@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/hkassaei/poc-entitlements-as-a-service-go/internal/config"
 	"github.com/hkassaei/poc-entitlements-as-a-service-go/internal/db"
@@ -83,51 +84,75 @@ func buildAppConfig(appID string, status, provStatus, tcStatus int, configData j
 	switch appID {
 	case config.AppIDVoWiFi:
 		var cd VoWiFiConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildVoWiFiConfig(status, provStatus, tcStatus, &cd)
 	case config.AppIDVoLTE:
 		var cd VoLTEConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildVoLTEConfig(status, provStatus, tcStatus, &cd)
 	case config.AppIDSMSoIP:
 		var cd SmsOipConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildSmsOipConfig(status, provStatus, tcStatus, &cd)
 	case config.AppIDODSACompanion:
 		var cd OdsaConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildCompanionConfig(status, provStatus, tcStatus, &cd, odsaCtx)
 	case config.AppIDODSAPrimary:
 		var cd OdsaConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildPrimaryConfig(status, provStatus, tcStatus, &cd, odsaCtx)
 	case config.AppIDDataPlanInfo:
 		var cd DataPlanConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildDataPlanConfig(status, provStatus, tcStatus, &cd, odsaCtx)
 	case config.AppIDServerInitiatedODSA:
 		var cd ServerOdsaConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildServerOdsaConfig(status, provStatus, tcStatus, &cd, odsaCtx)
 	case config.AppIDDirectCarrierBilling:
 		var cd DcbConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildDcbConfig(status, provStatus, tcStatus, &cd)
 	case config.AppIDPrivateUserIdentity:
 		var cd PrivateIdentityConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildPrivateIdentityConfig(status, provStatus, tcStatus, &cd)
 	case config.AppIDDeviceUserInfo:
 		var cd DeviceUserInfoConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildDeviceUserInfoConfig(status, provStatus, tcStatus, &cd, odsaCtx)
 	case config.AppIDAppAuthentication:
 		var cd AppAuthConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildAppAuthConfig(status, provStatus, tcStatus, &cd)
 	case config.AppIDSatelliteMode:
 		var cd SatModeConfigData
-		_ = json.Unmarshal(configData, &cd)
+		if err := json.Unmarshal(configData, &cd); err != nil {
+			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+		}
 		return BuildSatModeConfig(status, provStatus, tcStatus, &cd)
 	default:
 		return &protocol.ApplicationConfig{

@@ -41,12 +41,12 @@ func reauthStoreKey(reauthID string) string {
 }
 
 // GenerateReauthID generates a cryptographically random re-auth identity.
-func GenerateReauthID() string {
+func GenerateReauthID() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand: " + err.Error())
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // Store saves re-auth state in Redis with TTL.

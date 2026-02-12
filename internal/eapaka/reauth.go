@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 
@@ -27,10 +28,10 @@ type ReauthResult struct {
 	SessionID    string // set when counter-too-small triggers full-auth fallback
 }
 
-var reauthIdentifierCounter uint32 = 128
+var _reauthIdentifierCounter uint32 = 128
 
 func nextReauthIdentifier() int {
-	return int(atomic.AddUint32(&reauthIdentifierCounter, 1) % 256)
+	return int(atomic.AddUint32(&_reauthIdentifierCounter, 1) % 256)
 }
 
 // ReauthHandler handles EAP-AKA fast re-authentication.
@@ -70,10 +71,17 @@ func (h *ReauthHandler) HandleReauthRequest(ctx context.Context, reauthID string
 	kAut, _ := base64.StdEncoding.DecodeString(state.KAut)
 	kEncr, _ := base64.StdEncoding.DecodeString(state.KEncr)
 	nonceS := make([]byte, 16)
-	_, _ = rand.Read(nonceS)
-	nextReauthID := GenerateReauthID()
+	if _, err := rand.Read(nonceS); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	nextReauthID, err := GenerateReauthID()
+	if err != nil {
+		return nil, err
+	}
 	iv := make([]byte, 16)
-	_, _ = rand.Read(iv)
+	if _, err := rand.Read(iv); err != nil {
+		return nil, fmt.Errorf("generate iv: %w", err)
+	}
 	identifier := nextReauthIdentifier()
 
 	// Build inner attributes
@@ -86,7 +94,10 @@ func (h *ReauthHandler) HandleReauthRequest(ctx context.Context, reauthID string
 		{Type: config.ATNextReauthID, Value: []byte(nextReauthID)},
 	}
 
-	ciphertext := EncryptAttributes(kEncr, iv, innerAttrs)
+	ciphertext, err := EncryptAttributes(kEncr, iv, innerAttrs)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt re-auth attributes: %w", err)
+	}
 
 	reauthPacket := EapPacket{
 		Code: config.EAPCodeRequest, Identifier: identifier,
@@ -184,7 +195,12 @@ func (h *ReauthHandler) HandleReauthResponse(ctx context.Context, eapRelayBase64
 
 	// Decrypt inner attributes
 	kEncr, _ := base64.StdEncoding.DecodeString(session.KEncr)
-	innerAttrs := DecryptAttributes(kEncr, atIV.Value, atEncrData.Value)
+	innerAttrs, err := DecryptAttributes(kEncr, atIV.Value, atEncrData.Value)
+	if err != nil {
+		slog.Error("Failed to decrypt re-auth attributes", "err", err, "sessionId", sessionID)
+		_ = h.reauthSessionStore.Delete(ctx, sessionID)
+		return reauthFailureResult(session.Identifier), nil
+	}
 
 	// Check AT_COUNTER_TOO_SMALL → fall back to full auth
 	if findAttribute(innerAttrs, config.ATCounterTooSmall) != nil {

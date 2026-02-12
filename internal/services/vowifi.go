@@ -10,7 +10,7 @@ type VoWiFiConfigData struct {
 	ServiceFlowURL string                   `json:"serviceFlowUrl,omitempty"`
 }
 
-var defaultVoWiFiAddresses = []protocol.AddressConfig{
+var _defaultVoWiFiAddresses = []protocol.AddressConfig{
 	{AddrType: "1", Addr: "epdg.operator.com"},
 	{AddrType: "1", Addr: "pcscf.operator.com"},
 }
@@ -33,7 +33,7 @@ func BuildVoWiFiConfig(status, provStatus, tcStatus int, configData *VoWiFiConfi
 		if len(configData.Addresses) > 0 {
 			result.Addresses = configData.Addresses
 		} else {
-			result.Addresses = defaultVoWiFiAddresses
+			result.Addresses = _defaultVoWiFiAddresses
 		}
 	} else {
 		result.AddrStatus = protocol.IntPtr(0)

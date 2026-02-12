@@ -2,7 +2,6 @@ package eapaka
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"log/slog"
@@ -27,10 +26,10 @@ type AuthResult struct {
 	SessionID    string // set when resync issues a new challenge
 }
 
-var identifierCounter uint32
+var _identifierCounter uint32
 
 func nextIdentifier() int {
-	return int(atomic.AddUint32(&identifierCounter, 1) % 256)
+	return int(atomic.AddUint32(&_identifierCounter, 1) % 256)
 }
 
 // Orchestrator handles EAP-AKA authentication flows.
@@ -187,7 +186,10 @@ func (o *Orchestrator) HandleEapResponse(ctx context.Context, eapRelayBase64, se
 	}
 
 	// Issue re-auth identity
-	reauthID := GenerateReauthID()
+	reauthID, err := GenerateReauthID()
+	if err != nil {
+		return nil, err
+	}
 	err = o.reauthStore.Store(ctx, &ReauthState{
 		SubscriberID: subscriberID,
 		IMSI:         session.IMSI,
@@ -291,6 +293,3 @@ func eapFailureResult(identifier int) *AuthResult {
 		EapRelay:   EncodeEapToBase64(EapPacket{Code: config.EAPCodeFailure, Identifier: identifier}),
 	}
 }
-
-// Ensure rand import is used
-var _ = rand.Reader

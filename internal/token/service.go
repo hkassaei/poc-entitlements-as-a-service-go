@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 	"github.com/hkassaei/poc-entitlements-as-a-service-go/internal/db"
 	"github.com/redis/go-redis/v9"
 )
+
+// ErrTokenNotFound is returned when a token does not exist or has expired.
+var ErrTokenNotFound = errors.New("token not found")
 
 const tokenCachePrefix = "token:"
 
@@ -123,11 +127,11 @@ func (s *Service) ValidateToken(ctx context.Context, tokenValue string) (*TokenI
 	// Fallback to Postgres
 	token, err := s.queries.FindTokenByValue(ctx, tokenValue)
 	if err != nil {
-		return nil, nil // not found
+		return nil, ErrTokenNotFound
 	}
 
 	if token.ExpiresAt.Before(time.Now()) || token.Consumed {
-		return nil, nil
+		return nil, ErrTokenNotFound
 	}
 
 	// Re-cache in Redis

@@ -170,7 +170,7 @@ func EncodeEapPacket(packet EapPacket) []byte {
 	}
 
 	// Build attribute bytes
-	var attrBytes []byte
+	attrBytes := make([]byte, 0, len(packet.Attributes)*20)
 	for _, attr := range packet.Attributes {
 		attrBytes = append(attrBytes, EncodeAttribute(attr)...)
 	}

@@ -79,18 +79,20 @@ const (
 	AppIDSatelliteMode        = "ap2016"
 )
 
-// AllAppIDs lists all supported application IDs.
-var AllAppIDs = []string{
-	AppIDVoLTE,
-	AppIDVoWiFi,
-	AppIDSMSoIP,
-	AppIDODSACompanion,
-	AppIDODSAPrimary,
-	AppIDDataPlanInfo,
-	AppIDServerInitiatedODSA,
-	AppIDDirectCarrierBilling,
-	AppIDPrivateUserIdentity,
-	AppIDDeviceUserInfo,
-	AppIDAppAuthentication,
-	AppIDSatelliteMode,
+// AllAppIDs returns a copy of all supported application IDs.
+func AllAppIDs() []string {
+	return []string{
+		AppIDVoLTE,
+		AppIDVoWiFi,
+		AppIDSMSoIP,
+		AppIDODSACompanion,
+		AppIDODSAPrimary,
+		AppIDDataPlanInfo,
+		AppIDServerInitiatedODSA,
+		AppIDDirectCarrierBilling,
+		AppIDPrivateUserIdentity,
+		AppIDDeviceUserInfo,
+		AppIDAppAuthentication,
+		AppIDSatelliteMode,
+	}
 }

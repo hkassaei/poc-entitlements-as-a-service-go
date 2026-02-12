@@ -11,7 +11,7 @@ type VoLTEConfigData struct {
 	VoNREntitled  string                   `json:"vonrEntitled,omitempty"`
 }
 
-var defaultVoLTEAddresses = []protocol.AddressConfig{
+var _defaultVoLTEAddresses = []protocol.AddressConfig{
 	{AddrType: "1", Addr: "pcscf.operator.com"},
 }
 
@@ -34,7 +34,7 @@ func BuildVoLTEConfig(status, provStatus, tcStatus int, configData *VoLTEConfigD
 		if len(configData.Addresses) > 0 {
 			result.Addresses = configData.Addresses
 		} else {
-			result.Addresses = defaultVoLTEAddresses
+			result.Addresses = _defaultVoLTEAddresses
 		}
 		volte := configData.VoLTEEntitled
 		if volte == "" {

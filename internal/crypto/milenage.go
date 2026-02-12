@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/rand"
 	"crypto/subtle"
+	"fmt"
 )
 
 // MILENAGE constants (3GPP TS 35.206 Section 4.1)
@@ -84,12 +85,12 @@ func ComputeOPc(ki, op []byte) []byte {
 }
 
 // GenerateVectors generates authentication vectors with a random RAND.
-func GenerateVectors(ki, op, sqn, amf []byte) *AuthVectors {
+func GenerateVectors(ki, op, sqn, amf []byte) (*AuthVectors, error) {
 	randBytes := make([]byte, 16)
 	if _, err := rand.Read(randBytes); err != nil {
-		panic("crypto/rand: " + err.Error())
+		return nil, fmt.Errorf("crypto/rand: %w", err)
 	}
-	return GenerateVectorsWithRAND(ki, op, randBytes, sqn, amf)
+	return GenerateVectorsWithRAND(ki, op, randBytes, sqn, amf), nil
 }
 
 // GenerateVectorsWithRAND generates authentication vectors with a given RAND (deterministic, for testing).
