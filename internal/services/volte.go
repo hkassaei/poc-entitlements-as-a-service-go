@@ -29,28 +29,29 @@ func BuildVoLTEConfig(status, provStatus, tcStatus int, configData *VoLTEConfigD
 		ExtraParams:       map[string]string{},
 	}
 
-	if status == protocol.EntitlementStatusEnabled {
-		result.AddrStatus = protocol.IntPtr(1)
-		if len(configData.Addresses) > 0 {
-			result.Addresses = configData.Addresses
-		} else {
-			result.Addresses = _defaultVoLTEAddresses
-		}
-		volte := configData.VoLTEEntitled
-		if volte == "" {
-			volte = "1"
-		}
-		vonr := configData.VoNREntitled
-		if vonr == "" {
-			vonr = "1"
-		}
-		result.ExtraParams["VoLTE_Entitled"] = volte
-		result.ExtraParams["VoNR_Entitled"] = vonr
-	} else {
+	if status != protocol.EntitlementStatusEnabled {
 		result.AddrStatus = protocol.IntPtr(0)
 		result.ExtraParams["VoLTE_Entitled"] = "0"
 		result.ExtraParams["VoNR_Entitled"] = "0"
+		return result
 	}
+
+	result.AddrStatus = protocol.IntPtr(1)
+	if len(configData.Addresses) > 0 {
+		result.Addresses = configData.Addresses
+	} else {
+		result.Addresses = _defaultVoLTEAddresses
+	}
+	volte := configData.VoLTEEntitled
+	if volte == "" {
+		volte = "1"
+	}
+	vonr := configData.VoNREntitled
+	if vonr == "" {
+		vonr = "1"
+	}
+	result.ExtraParams["VoLTE_Entitled"] = volte
+	result.ExtraParams["VoNR_Entitled"] = vonr
 
 	return result
 }

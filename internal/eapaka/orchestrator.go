@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 
@@ -24,12 +25,6 @@ type AuthResult struct {
 	EapRelay     string
 	SubscriberID string
 	SessionID    string // set when resync issues a new challenge
-}
-
-var _identifierCounter uint32
-
-func nextIdentifier() int {
-	return int(atomic.AddUint32(&_identifierCounter, 1) % 256)
 }
 
 // Orchestrator handles EAP-AKA authentication flows.
@@ -59,7 +54,7 @@ func NewOrchestrator(
 func (o *Orchestrator) HandleInitialRequest(ctx context.Context, imsi string) (*ChallengeResult, error) {
 	vectors, err := o.hssClient.FetchVectors(ctx, imsi)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch HSS vectors: %w", err)
 	}
 
 	identity := BuildIdentity(imsi)
@@ -98,7 +93,7 @@ func (o *Orchestrator) HandleInitialRequest(ctx context.Context, imsi string) (*
 		MK:         mk,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create EAP session: %w", err)
 	}
 
 	slog.Info("EAP-AKA challenge sent", "imsi", imsi, "sessionId", sessionID)
@@ -110,7 +105,7 @@ func (o *Orchestrator) HandleInitialRequest(ctx context.Context, imsi string) (*
 func (o *Orchestrator) HandleEapResponse(ctx context.Context, eapRelayBase64, sessionID string) (*AuthResult, error) {
 	session, err := o.sessionStore.Get(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get EAP session: %w", err)
 	}
 	if session == nil {
 		slog.Warn("EAP session not found or expired", "sessionId", sessionID)
@@ -188,7 +183,7 @@ func (o *Orchestrator) HandleEapResponse(ctx context.Context, eapRelayBase64, se
 	// Issue re-auth identity
 	reauthID, err := GenerateReauthID()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate reauth ID: %w", err)
 	}
 	err = o.reauthStore.Store(ctx, &ReauthState{
 		SubscriberID: subscriberID,
@@ -200,7 +195,7 @@ func (o *Orchestrator) HandleEapResponse(ctx context.Context, eapRelayBase64, se
 		Identity:     reauthID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("store reauth state: %w", err)
 	}
 
 	_ = o.sessionStore.Delete(ctx, sessionID)
@@ -276,6 +271,12 @@ func FindATMACOffset(buf []byte) int {
 		offset += attrLen
 	}
 	return -1
+}
+
+var _identifierCounter uint32
+
+func nextIdentifier() int {
+	return int(atomic.AddUint32(&_identifierCounter, 1) % 256)
 }
 
 func findAttribute(attributes []EapAttribute, attrType int) *EapAttribute {

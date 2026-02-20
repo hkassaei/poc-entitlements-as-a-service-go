@@ -22,11 +22,6 @@ func NewIdempotencyCache(client *redis.Client) *IdempotencyCache {
 	return &IdempotencyCache{client: client}
 }
 
-func idempotencyKey(sessionID, eapRelay string) string {
-	h := sha256.Sum256([]byte(sessionID + eapRelay))
-	return "eap_idempotency:" + hex.EncodeToString(h[:])
-}
-
 // CacheResponse stores a response for later replay.
 func (c *IdempotencyCache) CacheResponse(ctx context.Context, sessionID, eapRelay string, response interface{}) error {
 	key := idempotencyKey(sessionID, eapRelay)
@@ -48,4 +43,9 @@ func (c *IdempotencyCache) GetCachedResponse(ctx context.Context, sessionID, eap
 		return nil, fmt.Errorf("get cached response: %w", err)
 	}
 	return json.RawMessage(data), nil
+}
+
+func idempotencyKey(sessionID, eapRelay string) string {
+	h := sha256.Sum256([]byte(sessionID + eapRelay))
+	return "eap_idempotency:" + hex.EncodeToString(h[:])
 }

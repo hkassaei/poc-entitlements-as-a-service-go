@@ -48,12 +48,11 @@ func BuildPrimaryConfig(status, provStatus, tcStatus int, configData *OdsaConfig
 }
 
 func primaryCheckEligibility(provStatus, tcStatus int, data *OdsaConfigData) *protocol.ApplicationConfig {
-	isEligible := data.SubscriptionState == "eligible" || data.SubscriptionState == "active"
-	entitlementStatus := protocol.EntitlementStatusDisabled
-	if isEligible {
-		entitlementStatus = protocol.EntitlementStatusEnabled
+	status := protocol.EntitlementStatusDisabled
+	if data.SubscriptionState == "eligible" || data.SubscriptionState == "active" {
+		status = protocol.EntitlementStatusEnabled
 	}
-	return BuildOdsaBaseConfig("ap2009", entitlementStatus, provStatus, tcStatus, protocol.SubscriptionResultDone, nil)
+	return BuildOdsaBaseConfig("ap2009", status, provStatus, tcStatus, protocol.SubscriptionResultDone, nil)
 }
 
 func primaryManageSubscription(status, provStatus, tcStatus int, data *OdsaConfigData) *protocol.ApplicationConfig {

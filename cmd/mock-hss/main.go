@@ -183,7 +183,12 @@ func main() {
 		defer crypto.ZeroSlice(op)
 
 		// Validate AUTS
-		result := crypto.ValidateAUTS(ki, randBytes, autsBytes, op)
+		result, err := crypto.ValidateAUTS(ki, randBytes, autsBytes, op)
+		if err != nil {
+			slog.Error("Failed to validate AUTS", "err", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
 		if !result.Valid {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -228,6 +233,7 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	}
 
+	shutdownErr := make(chan error, 1)
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -235,14 +241,16 @@ func main() {
 		slog.Info("Shutting down mock-hss")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			slog.Error("Shutdown error", "err", err)
-		}
+		shutdownErr <- srv.Shutdown(shutdownCtx)
 	}()
 
 	slog.Info("Mock HSS starting", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("Mock HSS failed", "err", err)
 		os.Exit(1)
+	}
+
+	if err := <-shutdownErr; err != nil {
+		slog.Error("Shutdown error", "err", err)
 	}
 }

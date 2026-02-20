@@ -83,7 +83,7 @@ func (s *Service) GenerateToken(ctx context.Context, subscriberID, tokenType, cl
 		CreatedByIP:  &clientIP,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("insert token: %w", err)
+		return nil, fmt.Errorf("persist token: %w", err)
 	}
 
 	// Cache in Redis
@@ -106,28 +106,17 @@ func (s *Service) GenerateToken(ctx context.Context, subscriberID, tokenType, cl
 // Returns nil if invalid/expired.
 func (s *Service) ValidateToken(ctx context.Context, tokenValue string) (*TokenInfo, error) {
 	// Try Redis cache first
-	cached, err := s.redis.Get(ctx, tokenCacheKey(tokenValue)).Bytes()
-	if err == nil && len(cached) > 0 {
-		var data cachedToken
-		if json.Unmarshal(cached, &data) == nil {
-			expiresAt, _ := time.Parse(time.RFC3339Nano, data.ExpiresAt)
-			if expiresAt.After(time.Now()) {
-				return &TokenInfo{
-					TokenValue:   tokenValue,
-					SubscriberID: data.SubscriberID,
-					TokenType:    data.TokenType,
-					ExpiresAt:    expiresAt,
-				}, nil
-			}
-			// Expired in cache — delete it
-			_ = s.redis.Del(ctx, tokenCacheKey(tokenValue)).Err()
-		}
+	if info, ok := s.checkCache(ctx, tokenValue); ok {
+		return info, nil
 	}
 
 	// Fallback to Postgres
 	token, err := s.queries.FindTokenByValue(ctx, tokenValue)
-	if err != nil {
+	if errors.Is(err, db.ErrTokenNotFound) {
 		return nil, ErrTokenNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query token: %w", err)
 	}
 
 	if token.ExpiresAt.Before(time.Now()) || token.Consumed {
@@ -153,12 +142,39 @@ func (s *Service) ValidateToken(ctx context.Context, tokenValue string) (*TokenI
 	}, nil
 }
 
+// checkCache attempts to validate a token from Redis cache.
+// Returns the token info and true if a valid cached entry exists.
+func (s *Service) checkCache(ctx context.Context, tokenValue string) (*TokenInfo, bool) {
+	cached, err := s.redis.Get(ctx, tokenCacheKey(tokenValue)).Bytes()
+	if err != nil || len(cached) == 0 {
+		return nil, false
+	}
+
+	var data cachedToken
+	if err := json.Unmarshal(cached, &data); err != nil {
+		return nil, false
+	}
+
+	expiresAt, _ := time.Parse(time.RFC3339Nano, data.ExpiresAt)
+	if expiresAt.Before(time.Now()) {
+		_ = s.redis.Del(ctx, tokenCacheKey(tokenValue)).Err()
+		return nil, false
+	}
+
+	return &TokenInfo{
+		TokenValue:   tokenValue,
+		SubscriberID: data.SubscriberID,
+		TokenType:    data.TokenType,
+		ExpiresAt:    expiresAt,
+	}, true
+}
+
 // GenerateTemporaryToken creates a temporary token for ODSA operations.
 // Stores scope and operation targets in Redis alongside the token cache.
 func (s *Service) GenerateTemporaryToken(ctx context.Context, subscriberID, clientIP, scope string, operationTargets []string) (*TokenInfo, error) {
 	tokenInfo, err := s.GenerateToken(ctx, subscriberID, config.TokenTypeTemp, clientIP)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate temporary token: %w", err)
 	}
 
 	// Store scope and targets in Redis

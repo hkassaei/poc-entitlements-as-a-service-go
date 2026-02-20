@@ -35,10 +35,6 @@ func NewReauthSessionStore(client *redis.Client) *ReauthSessionStore {
 	return &ReauthSessionStore{client: client}
 }
 
-func reauthSessionKey(sessionID string) string {
-	return "reauth_session:" + sessionID
-}
-
 // Create creates a new re-auth session and returns the session ID.
 func (s *ReauthSessionStore) Create(ctx context.Context, data *ReauthSessionData) (string, error) {
 	sessionID := uuid.New().String()
@@ -97,5 +93,12 @@ func (s *ReauthSessionStore) Get(ctx context.Context, sessionID string) (*Reauth
 
 // Delete removes a re-auth session.
 func (s *ReauthSessionStore) Delete(ctx context.Context, sessionID string) error {
-	return s.client.Del(ctx, reauthSessionKey(sessionID)).Err()
+	if err := s.client.Del(ctx, reauthSessionKey(sessionID)).Err(); err != nil {
+		return fmt.Errorf("delete reauth session %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+func reauthSessionKey(sessionID string) string {
+	return "reauth_session:" + sessionID
 }

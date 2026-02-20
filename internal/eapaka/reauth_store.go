@@ -36,10 +36,6 @@ func NewReauthStore(client *redis.Client, ttlSeconds int) *ReauthStore {
 	}
 }
 
-func reauthStoreKey(reauthID string) string {
-	return "reauth:" + reauthID
-}
-
 // GenerateReauthID generates a cryptographically random re-auth identity.
 func GenerateReauthID() (string, error) {
 	b := make([]byte, 24)
@@ -97,5 +93,12 @@ func (s *ReauthStore) Get(ctx context.Context, reauthID string) (*ReauthState, e
 
 // Delete removes re-auth state.
 func (s *ReauthStore) Delete(ctx context.Context, reauthID string) error {
-	return s.client.Del(ctx, reauthStoreKey(reauthID)).Err()
+	if err := s.client.Del(ctx, reauthStoreKey(reauthID)).Err(); err != nil {
+		return fmt.Errorf("delete reauth state %s: %w", reauthID, err)
+	}
+	return nil
+}
+
+func reauthStoreKey(reauthID string) string {
+	return "reauth:" + reauthID
 }

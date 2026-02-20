@@ -44,30 +44,29 @@ func UserAgentParser(next http.Handler) http.Handler {
 
 // VersionCheck middleware validates entitlement_version against supported versions.
 func VersionCheck(cfg config.Config) func(http.Handler) http.Handler {
+	supported := make(map[string]bool, len(cfg.SupportedVersions))
+	for _, v := range cfg.SupportedVersions {
+		supported[v] = true
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var version string
-			if r.Method == http.MethodGet {
-				version = r.URL.Query().Get("entitlement_version")
-			}
 			// For POST, version check happens after body parsing in the route handler.
 			// GET version check happens here.
-			if version != "" {
-				supported := false
-				for _, v := range cfg.SupportedVersions {
-					if v == version {
-						supported = true
-						break
-					}
-				}
-				if !supported {
-					writeJSON(w, http.StatusNotAcceptable, map[string]interface{}{
-						"error":   "Not Acceptable",
-						"message": "Unsupported entitlement_version: " + version + ". Supported: " + strings.Join(cfg.SupportedVersions, ", "),
-					})
-					return
-				}
+			if r.Method != http.MethodGet {
+				next.ServeHTTP(w, r)
+				return
 			}
+
+			version := r.URL.Query().Get("entitlement_version")
+			if version != "" && !supported[version] {
+				writeJSON(w, http.StatusNotAcceptable, map[string]interface{}{
+					"error":   "Not Acceptable",
+					"message": "Unsupported entitlement_version: " + version + ". Supported: " + strings.Join(cfg.SupportedVersions, ", "),
+				})
+				return
+			}
+
 			next.ServeHTTP(w, r)
 		})
 	}

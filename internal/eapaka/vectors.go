@@ -156,29 +156,29 @@ func (c *HSSClient) ResyncVectors(ctx context.Context, imsi string, randVal, aut
 }
 
 func decodeVectors(data *vectorsResponse) (*HSSVectors, error) {
-	randBytes, err := base64.StdEncoding.DecodeString(data.RAND)
+	rand, err := base64.StdEncoding.DecodeString(data.RAND)
 	if err != nil {
 		return nil, fmt.Errorf("decode RAND: %w", err)
 	}
-	autnBytes, err := base64.StdEncoding.DecodeString(data.AUTN)
+	autn, err := base64.StdEncoding.DecodeString(data.AUTN)
 	if err != nil {
 		return nil, fmt.Errorf("decode AUTN: %w", err)
 	}
-	xresBytes, err := base64.StdEncoding.DecodeString(data.XRES)
+	xres, err := base64.StdEncoding.DecodeString(data.XRES)
 	if err != nil {
 		return nil, fmt.Errorf("decode XRES: %w", err)
 	}
-	ckBytes, err := base64.StdEncoding.DecodeString(data.CK)
+	ck, err := base64.StdEncoding.DecodeString(data.CK)
 	if err != nil {
 		return nil, fmt.Errorf("decode CK: %w", err)
 	}
-	ikBytes, err := base64.StdEncoding.DecodeString(data.IK)
+	ik, err := base64.StdEncoding.DecodeString(data.IK)
 	if err != nil {
 		return nil, fmt.Errorf("decode IK: %w", err)
 	}
 
 	return &HSSVectors{
-		RAND: randBytes, AUTN: autnBytes, XRES: xresBytes,
-		CK: ckBytes, IK: ikBytes,
+		RAND: rand, AUTN: autn, XRES: xres,
+		CK: ck, IK: ik,
 	}, nil
 }

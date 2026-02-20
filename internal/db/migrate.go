@@ -28,16 +28,19 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 // findSchemaPath locates sql/schema.sql relative to this file or the working directory.
 func findSchemaPath() string {
+	fallback := filepath.Join("sql", "schema.sql")
+
 	// Try relative to this source file first (for tests)
 	_, filename, _, ok := runtime.Caller(0)
-	if ok {
-		dir := filepath.Dir(filename)
-		candidate := filepath.Join(dir, "..", "..", "sql", "schema.sql")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+	if !ok {
+		return fallback
 	}
 
-	// Fall back to working directory
-	return filepath.Join("sql", "schema.sql")
+	dir := filepath.Dir(filename)
+	candidate := filepath.Join(dir, "..", "..", "sql", "schema.sql")
+	if _, err := os.Stat(candidate); err != nil {
+		return fallback
+	}
+
+	return candidate
 }
