@@ -91,6 +91,30 @@
 - Go Docker configs: `Dockerfile.ecs`, `Dockerfile.mock-hss`, `docker-compose.go.yml`
 - Go CI: `.github/workflows/ci.yml`, `.github/workflows/security.yml`
 
+## Uber Go Style Guide Audit (27 files, 631 insertions, 423 deletions)
+
+### HIGH Priority Bugs Found in "Working" Code
+- **`panic` in `AESEncrypt`** (`internal/crypto/milenage.go`) — `aes.NewCipher` error triggered `panic`, killing the entire process. Changed to return `([]byte, error)`, cascading error returns through 7 functions: `ComputeOPc`, `GenerateVectorsWithRAND`, `F5Star`, `F1Star`, `ValidateAUTS`, `GenerateAUTS`. Lesson: `panic` is for programmer bugs, not runtime conditions.
+- **Audit goroutine used `r.Context()`** (`internal/server/audit.go`) — request context is canceled when the handler returns, so every background DB write silently failed. Fixed with `context.Background()` + 5s timeout. Lesson: fire-and-forget goroutines must never use the request context.
+- **Error masking in token service** (`internal/token/service.go`) — all `FindTokenByValue` errors returned `ErrTokenNotFound`, hiding database failures. Fixed with `errors.Is(err, db.ErrTokenNotFound)` check before generic error handling. Lesson: always check sentinel errors specifically before fallthrough.
+
+### MEDIUM Priority Fixes
+- **18 bare `return err`** wrapped with `fmt.Errorf("operation: %w", err)` across orchestrator, reauth, session stores, builder, and cmd/ecs/main.go
+- **Line-of-sight refactoring** in middleware, token service, migrate, volte, smsoip — guard clauses and early returns to keep happy path at left margin
+- **VoWiFi gotcha**: guard clause refactoring broke `TestVoWiFi_ServiceFlowURLWhenTCRequiresAcceptance` — the `tcStatus` check ran after both if/else branches, so early return skipped it. Kept if/else for that specific case.
+- **Signal handler goroutines** (`cmd/ecs/main.go`, `cmd/mock-hss/main.go`) — added `shutdownErr` channel for lifecycle management instead of fire-and-forget
+- **Split `handleEapRelayPath`** (101 lines) into 3 methods: dispatcher, `handleReauthEapRelay`, `handleFullAuthEapRelay`
+- **Generics deduplication** in `builder.go` — `unmarshalConfig[T any]()` replaced 8 identical 4-line blocks with 1-liners
+- **Compile-time interface check** added: `var _ http.ResponseWriter = (*statusRecorder)(nil)` in audit.go
+
+### LOW Priority Polish
+- **Function ordering**: moved unexported helpers (`sessionKey`, `reauthStoreKey`, `idempotencyKey`, `reauthSessionKey`, etc.) below exported methods in 8 files
+- **Variable naming**: removed `*Bytes` suffix in `vectors.go`/`session.go` (tight scope makes it redundant), shortened `operationTypeStr` → `opTypeRaw`, `acceptContentType` → `ct` in routes.go, inlined single-use `isEligible` in ODSA check-eligibility functions
+- **Doc comments**: added `// SymbolName is...` format to ~70 exported constants in `config/constants.go`, `protocol/statuscodes.go`, `protocol/apptypes.go`, `db/queries.go` — referencing RFC 4187, RFC 3748, and GSMA TS.43
+
+### Key Takeaway
+Style guide audits find real bugs. The three HIGH-priority issues were invisible in tests and code review but would cause production failures (process crash, lost audit logs, misleading error messages).
+
 ## Production TODO
 - **KMS KeyRing: switch to static name + `prevent_destroy = true`** — dev/staging uses random suffix for easy destroy+recreate, but production must use a fixed name (`entitlement-keys`) with `prevent_destroy` on both the KeyRing and CryptoKey. A random Terraform glitch must never orphan the encryption key that protects the subscriber Ki database.
 
