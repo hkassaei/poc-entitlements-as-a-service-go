@@ -36,10 +36,6 @@ func NewSessionStore(client *redis.Client) *SessionStore {
 	return &SessionStore{client: client}
 }
 
-func sessionKey(sessionID string) string {
-	return "eap_session:" + sessionID
-}
-
 // Create creates a new EAP session and returns the session ID.
 func (s *SessionStore) Create(ctx context.Context, data *EapSessionData) (string, error) {
 	sessionID := uuid.New().String()
@@ -79,32 +75,35 @@ func (s *SessionStore) Get(ctx context.Context, sessionID string) (*EapSessionDa
 		return nil, nil
 	}
 
-	randBytes, _ := base64.StdEncoding.DecodeString(data["rand"])
-	xresBytes, _ := base64.StdEncoding.DecodeString(data["xres"])
-	ckBytes, _ := base64.StdEncoding.DecodeString(data["ck"])
-	ikBytes, _ := base64.StdEncoding.DecodeString(data["ik"])
-	kAutBytes, _ := base64.StdEncoding.DecodeString(data["kAut"])
-	kEncrBytes, _ := base64.StdEncoding.DecodeString(data["kEncr"])
-	mkBytes, _ := base64.StdEncoding.DecodeString(data["mk"])
+	rand, _ := base64.StdEncoding.DecodeString(data["rand"])
+	xres, _ := base64.StdEncoding.DecodeString(data["xres"])
+	ck, _ := base64.StdEncoding.DecodeString(data["ck"])
+	ik, _ := base64.StdEncoding.DecodeString(data["ik"])
+	kAut, _ := base64.StdEncoding.DecodeString(data["kAut"])
+	kEncr, _ := base64.StdEncoding.DecodeString(data["kEncr"])
+	mk, _ := base64.StdEncoding.DecodeString(data["mk"])
 	identifier, _ := strconv.Atoi(data["identifier"])
 
 	return &EapSessionData{
 		IMSI:       data["imsi"],
 		State:      data["state"],
-		RAND:       randBytes,
-		XRES:       xresBytes,
-		CK:         ckBytes,
-		IK:         ikBytes,
+		RAND:       rand,
+		XRES:       xres,
+		CK:         ck,
+		IK:         ik,
 		Identifier: identifier,
-		KAut:       kAutBytes,
-		KEncr:      kEncrBytes,
-		MK:         mkBytes,
+		KAut:       kAut,
+		KEncr:      kEncr,
+		MK:         mk,
 	}, nil
 }
 
 // Delete removes an EAP session.
 func (s *SessionStore) Delete(ctx context.Context, sessionID string) error {
-	return s.client.Del(ctx, sessionKey(sessionID)).Err()
+	if err := s.client.Del(ctx, sessionKey(sessionID)).Err(); err != nil {
+		return fmt.Errorf("delete session %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 // Update updates specific fields in an EAP session and resets the TTL.
@@ -148,4 +147,8 @@ func (s *SessionStore) Update(ctx context.Context, sessionID string, updates *Ea
 		return fmt.Errorf("update session: %w", err)
 	}
 	return nil
+}
+
+func sessionKey(sessionID string) string {
+	return "eap_session:" + sessionID
 }

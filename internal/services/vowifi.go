@@ -30,10 +30,9 @@ func BuildVoWiFiConfig(status, provStatus, tcStatus int, configData *VoWiFiConfi
 
 	if status == protocol.EntitlementStatusEnabled {
 		result.AddrStatus = protocol.IntPtr(1)
+		result.Addresses = _defaultVoWiFiAddresses
 		if len(configData.Addresses) > 0 {
 			result.Addresses = configData.Addresses
-		} else {
-			result.Addresses = _defaultVoWiFiAddresses
 		}
 	} else {
 		result.AddrStatus = protocol.IntPtr(0)

@@ -28,12 +28,6 @@ type ReauthResult struct {
 	SessionID    string // set when counter-too-small triggers full-auth fallback
 }
 
-var _reauthIdentifierCounter uint32 = 128
-
-func nextReauthIdentifier() int {
-	return int(atomic.AddUint32(&_reauthIdentifierCounter, 1) % 256)
-}
-
 // ReauthHandler handles EAP-AKA fast re-authentication.
 type ReauthHandler struct {
 	reauthStore        *ReauthStore
@@ -55,7 +49,7 @@ func NewReauthHandler(reauthStore *ReauthStore, reauthSessionStore *ReauthSessio
 func (h *ReauthHandler) HandleReauthRequest(ctx context.Context, reauthID string) (*ReauthChallengeResult, error) {
 	state, err := h.reauthStore.Get(ctx, reauthID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get reauth state: %w", err)
 	}
 	if state == nil {
 		slog.Info("Re-auth state not found, falling back to full auth", "reauthId", reauthID)
@@ -76,7 +70,7 @@ func (h *ReauthHandler) HandleReauthRequest(ctx context.Context, reauthID string
 	}
 	nextReauthID, err := GenerateReauthID()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate reauth ID: %w", err)
 	}
 	iv := make([]byte, 16)
 	if _, err := rand.Read(iv); err != nil {
@@ -129,7 +123,7 @@ func (h *ReauthHandler) HandleReauthRequest(ctx context.Context, reauthID string
 		IMSI:         state.IMSI,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create reauth session: %w", err)
 	}
 
 	slog.Info("Re-auth challenge sent", "reauthId", reauthID, "sessionId", sessionID, "counter", state.Counter)
@@ -141,7 +135,7 @@ func (h *ReauthHandler) HandleReauthRequest(ctx context.Context, reauthID string
 func (h *ReauthHandler) HandleReauthResponse(ctx context.Context, eapRelayBase64, sessionID, clientIP string) (*ReauthResult, error) {
 	session, err := h.reauthSessionStore.Get(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get reauth session: %w", err)
 	}
 	if session == nil {
 		slog.Warn("Re-auth session not found or expired", "sessionId", sessionID)
@@ -211,7 +205,7 @@ func (h *ReauthHandler) HandleReauthResponse(ctx context.Context, eapRelayBase64
 
 		fullAuthResult, err := h.orchestrator.HandleInitialRequest(ctx, session.IMSI)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("fallback to full auth: %w", err)
 		}
 		return &ReauthResult{
 			StatusCode: 401,
@@ -252,7 +246,7 @@ func (h *ReauthHandler) HandleReauthResponse(ctx context.Context, eapRelayBase64
 		Identity:     session.NextReauthID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rotate reauth state: %w", err)
 	}
 
 	_ = h.reauthSessionStore.Delete(ctx, sessionID)
@@ -267,6 +261,12 @@ func (h *ReauthHandler) HandleReauthResponse(ctx context.Context, eapRelayBase64
 		SubscriberID: session.SubscriberID,
 		EapRelay:     EncodeEapToBase64(EapPacket{Code: config.EAPCodeSuccess, Identifier: session.Identifier}),
 	}, nil
+}
+
+var _reauthIdentifierCounter uint32 = 128
+
+func nextReauthIdentifier() int {
+	return int(atomic.AddUint32(&_reauthIdentifierCounter, 1) % 256)
 }
 
 func reauthFailureResult(identifier int) *ReauthResult {

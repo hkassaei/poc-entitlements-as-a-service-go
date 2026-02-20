@@ -111,50 +111,56 @@ func (h *EntitlementHandler) handleEapRelayPath(ctx context.Context, w http.Resp
 
 	odsaCtx := h.buildOdsaContext(body.Operation, body.OperationType)
 
-	// Path 1a: Try re-auth session first
+	// Try re-auth session first, fall back to full auth
 	reauthSession, _ := h.reauthSessionStore.Get(ctx, sessionID)
 	if reauthSession != nil {
-		reauthResult, err := h.reauthHandler.HandleReauthResponse(ctx, body.EapRelay, sessionID, ip)
-		if err != nil {
-			slog.Error("Re-auth response error", "err", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-				"error": "Internal Server Error", "message": "Re-authentication failed", "statusCode": 500,
-			})
-			return
-		}
+		h.handleReauthEapRelay(ctx, w, body, sessionID, ip, odsaCtx)
+		return
+	}
 
-		if reauthResult.StatusCode == 200 && reauthResult.ReauthID != "" {
-			formatted, err := h.responseBuilder.BuildEntitlementResponse(ctx, reauthResult.ReauthID, reauthResult.SubscriberID, body.App, body.AcceptContentType, odsaCtx)
-			if err != nil {
-				slog.Error("Build response error", "err", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-					"error": "Internal Server Error", "message": "Failed to build response", "statusCode": 500,
-				})
-				return
-			}
+	h.handleFullAuthEapRelay(ctx, w, body, sessionID, odsaCtx)
+}
 
-			h.handleTempTokenSideEffect(ctx, formatted, body.Operation, body.App, reauthResult.SubscriberID, ip)
-			h.sendFormattedResponse(ctx, w, formatted, reauthResult.EapRelay, sessionID, body.EapRelay)
-			return
-		}
-
-		// Counter-too-small fallback
-		if reauthResult.StatusCode == 401 && reauthResult.SessionID != "" {
-			w.Header().Set("X-EAP-Session-Id", reauthResult.SessionID)
-			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-				"eap_relay": reauthResult.EapRelay, "statusCode": 401,
-			})
-			return
-		}
-
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Unauthorized", "message": "Re-authentication failed",
-			"eap_relay": reauthResult.EapRelay, "statusCode": 401,
+func (h *EntitlementHandler) handleReauthEapRelay(ctx context.Context, w http.ResponseWriter, body entitlementPostRequest, sessionID, ip string, odsaCtx *services.OdsaContext) {
+	result, err := h.reauthHandler.HandleReauthResponse(ctx, body.EapRelay, sessionID, ip)
+	if err != nil {
+		slog.Error("Re-auth response error", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "Internal Server Error", "message": "Re-authentication failed", "statusCode": 500,
 		})
 		return
 	}
 
-	// Path 1b: Full auth RT2
+	if result.StatusCode == 200 && result.ReauthID != "" {
+		formatted, err := h.responseBuilder.BuildEntitlementResponse(ctx, result.ReauthID, result.SubscriberID, body.App, body.AcceptContentType, odsaCtx)
+		if err != nil {
+			slog.Error("Build response error", "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+				"error": "Internal Server Error", "message": "Failed to build response", "statusCode": 500,
+			})
+			return
+		}
+		h.handleTempTokenSideEffect(ctx, formatted, body.Operation, body.App, result.SubscriberID, ip)
+		h.sendFormattedResponse(ctx, w, formatted, result.EapRelay, sessionID, body.EapRelay)
+		return
+	}
+
+	// Counter-too-small fallback
+	if result.StatusCode == 401 && result.SessionID != "" {
+		w.Header().Set("X-EAP-Session-Id", result.SessionID)
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+			"eap_relay": result.EapRelay, "statusCode": 401,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+		"error": "Unauthorized", "message": "Re-authentication failed",
+		"eap_relay": result.EapRelay, "statusCode": 401,
+	})
+}
+
+func (h *EntitlementHandler) handleFullAuthEapRelay(ctx context.Context, w http.ResponseWriter, body entitlementPostRequest, sessionID string, odsaCtx *services.OdsaContext) {
 	result, err := h.orchestrator.HandleEapResponse(ctx, body.EapRelay, sessionID)
 	if err != nil {
 		slog.Error("EAP response error", "err", err)
@@ -173,7 +179,6 @@ func (h *EntitlementHandler) handleEapRelayPath(ctx context.Context, w http.Resp
 			})
 			return
 		}
-
 		h.sendFormattedResponse(ctx, w, formatted, result.EapRelay, sessionID, body.EapRelay)
 		return
 	}
@@ -281,15 +286,15 @@ func (h *EntitlementHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	appID := q.Get("app")
-	acceptContentType := q.Get("accept_content_type")
+	ct := q.Get("accept_content_type")
 	operation := q.Get("operation")
-	operationTypeStr := q.Get("operation_type")
+	opTypeRaw := q.Get("operation_type")
 
 	var odsaCtx *services.OdsaContext
 	if operation != "" {
 		opType := 0
-		if operationTypeStr != "" {
-			opType, _ = strconv.Atoi(operationTypeStr)
+		if opTypeRaw != "" {
+			opType, _ = strconv.Atoi(opTypeRaw)
 		}
 		odsaCtx = &services.OdsaContext{Operation: operation, OperationType: opType}
 	}
@@ -297,7 +302,7 @@ func (h *EntitlementHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	// Try re-auth state first (read-only, no counter change)
 	reauthState, _ := h.reauthStore.Get(ctx, tokenVal)
 	if reauthState != nil {
-		formatted, err := h.responseBuilder.BuildEntitlementResponse(ctx, tokenVal, reauthState.SubscriberID, appID, acceptContentType, odsaCtx)
+		formatted, err := h.responseBuilder.BuildEntitlementResponse(ctx, tokenVal, reauthState.SubscriberID, appID, ct, odsaCtx)
 		if err != nil {
 			slog.Error("Build response error", "err", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
@@ -318,7 +323,7 @@ func (h *EntitlementHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	formatted, err := h.responseBuilder.BuildEntitlementResponse(ctx, tokenVal, tokenInfo.SubscriberID, appID, acceptContentType, odsaCtx)
+	formatted, err := h.responseBuilder.BuildEntitlementResponse(ctx, tokenVal, tokenInfo.SubscriberID, appID, ct, odsaCtx)
 	if err != nil {
 		slog.Error("Build response error", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{

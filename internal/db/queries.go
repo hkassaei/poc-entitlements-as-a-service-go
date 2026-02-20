@@ -12,9 +12,12 @@ import (
 )
 
 var (
-	ErrSubscriberNotFound  = errors.New("subscriber not found")
+	// ErrSubscriberNotFound is the sentinel error returned when a subscriber lookup yields no rows.
+	ErrSubscriberNotFound = errors.New("subscriber not found")
+	// ErrEntitlementNotFound is the sentinel error returned when an entitlement lookup yields no rows.
 	ErrEntitlementNotFound = errors.New("entitlement not found")
-	ErrTokenNotFound       = errors.New("token not found")
+	// ErrTokenNotFound is the sentinel error returned when a token lookup yields no rows.
+	ErrTokenNotFound = errors.New("token not found")
 )
 
 // Queries provides database query methods.

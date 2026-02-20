@@ -5,22 +5,6 @@ import (
 	"strings"
 )
 
-func escapeXML(value string) string {
-	value = strings.ReplaceAll(value, "&", "&amp;")
-	value = strings.ReplaceAll(value, "<", "&lt;")
-	value = strings.ReplaceAll(value, ">", "&gt;")
-	value = strings.ReplaceAll(value, "\"", "&quot;")
-	return value
-}
-
-func parm(name, value string) string {
-	return `    <parm name="` + escapeXML(name) + `" value="` + escapeXML(value) + `"/>`
-}
-
-func parmIndent(name, value, indent string) string {
-	return indent + `<parm name="` + escapeXML(name) + `" value="` + escapeXML(value) + `"/>`
-}
-
 // BuildXMLResponse converts a ServiceEntitlementResponse to WAP-Provisioning XML format.
 func BuildXMLResponse(response *ServiceEntitlementResponse) string {
 	lines := []string{
@@ -46,6 +30,22 @@ func BuildXMLResponse(response *ServiceEntitlementResponse) string {
 
 	lines = append(lines, `</wap-provisioningdoc>`)
 	return strings.Join(lines, "\n")
+}
+
+func escapeXML(value string) string {
+	value = strings.ReplaceAll(value, "&", "&amp;")
+	value = strings.ReplaceAll(value, "<", "&lt;")
+	value = strings.ReplaceAll(value, ">", "&gt;")
+	value = strings.ReplaceAll(value, "\"", "&quot;")
+	return value
+}
+
+func parm(name, value string) string {
+	return `    <parm name="` + escapeXML(name) + `" value="` + escapeXML(value) + `"/>`
+}
+
+func parmIndent(name, value, indent string) string {
+	return indent + `<parm name="` + escapeXML(name) + `" value="` + escapeXML(value) + `"/>`
 }
 
 func buildApplicationCharacteristic(app *ApplicationConfig) []string {

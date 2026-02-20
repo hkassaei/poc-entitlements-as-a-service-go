@@ -26,15 +26,16 @@ func BuildSmsOipConfig(status, provStatus, tcStatus int, configData *SmsOipConfi
 		ProvStatus:        protocol.IntPtr(provStatus),
 	}
 
-	if status == protocol.EntitlementStatusEnabled {
-		result.AddrStatus = protocol.IntPtr(1)
-		if len(configData.Addresses) > 0 {
-			result.Addresses = configData.Addresses
-		} else {
-			result.Addresses = _defaultSmsOipAddresses
-		}
-	} else {
+	if status != protocol.EntitlementStatusEnabled {
 		result.AddrStatus = protocol.IntPtr(0)
+		return result
+	}
+
+	result.AddrStatus = protocol.IntPtr(1)
+	if len(configData.Addresses) > 0 {
+		result.Addresses = configData.Addresses
+	} else {
+		result.Addresses = _defaultSmsOipAddresses
 	}
 
 	return result

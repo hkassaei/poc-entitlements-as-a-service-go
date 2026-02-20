@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -54,7 +55,7 @@ func main() {
 	subscriberLookup := func(ctx context.Context, imsi string) (string, error) {
 		sub, err := queries.FindSubscriberByIMSI(ctx, imsi)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("look up subscriber %s: %w", imsi, err)
 		}
 		return sub.ID, nil
 	}
@@ -72,7 +73,8 @@ func main() {
 
 	srv := server.NewServer(cfg, entitlementHandler)
 
-	// Graceful shutdown
+	// Graceful shutdown: signal handler goroutine communicates via channel
+	shutdownErr := make(chan error, 1)
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -81,15 +83,16 @@ func main() {
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			slog.Error("Server shutdown error", "err", err)
-		}
+		shutdownErr <- srv.Shutdown(shutdownCtx)
 	}()
 
 	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("Server failed", "err", err)
 		os.Exit(1)
+	}
+
+	if err := <-shutdownErr; err != nil {
+		slog.Error("Server shutdown error", "err", err)
 	}
 
 	slog.Info("Server stopped")

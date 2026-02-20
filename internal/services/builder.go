@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/hkassaei/poc-entitlements-as-a-service-go/internal/config"
@@ -36,7 +37,7 @@ func (b *ResponseBuilder) BuildEntitlementResponse(
 ) (*FormattedResponse, error) {
 	ents, err := b.queries.FindEntitlementsBySubscriber(ctx, subscriberID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find entitlements: %w", err)
 	}
 
 	var entitlement *db.Entitlement
@@ -80,80 +81,41 @@ func (b *ResponseBuilder) BuildEntitlementResponse(
 	}, nil
 }
 
+// unmarshalConfig unmarshals configData into a typed struct, logging on error.
+func unmarshalConfig[T any](configData json.RawMessage, appID string) *T {
+	var cd T
+	if err := json.Unmarshal(configData, &cd); err != nil {
+		slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+	}
+	return &cd
+}
+
 func buildAppConfig(appID string, status, provStatus, tcStatus int, configData json.RawMessage, odsaCtx *OdsaContext) *protocol.ApplicationConfig {
 	switch appID {
 	case config.AppIDVoWiFi:
-		var cd VoWiFiConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildVoWiFiConfig(status, provStatus, tcStatus, &cd)
+		return BuildVoWiFiConfig(status, provStatus, tcStatus, unmarshalConfig[VoWiFiConfigData](configData, appID))
 	case config.AppIDVoLTE:
-		var cd VoLTEConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildVoLTEConfig(status, provStatus, tcStatus, &cd)
+		return BuildVoLTEConfig(status, provStatus, tcStatus, unmarshalConfig[VoLTEConfigData](configData, appID))
 	case config.AppIDSMSoIP:
-		var cd SmsOipConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildSmsOipConfig(status, provStatus, tcStatus, &cd)
+		return BuildSmsOipConfig(status, provStatus, tcStatus, unmarshalConfig[SmsOipConfigData](configData, appID))
 	case config.AppIDODSACompanion:
-		var cd OdsaConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildCompanionConfig(status, provStatus, tcStatus, &cd, odsaCtx)
+		return BuildCompanionConfig(status, provStatus, tcStatus, unmarshalConfig[OdsaConfigData](configData, appID), odsaCtx)
 	case config.AppIDODSAPrimary:
-		var cd OdsaConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildPrimaryConfig(status, provStatus, tcStatus, &cd, odsaCtx)
+		return BuildPrimaryConfig(status, provStatus, tcStatus, unmarshalConfig[OdsaConfigData](configData, appID), odsaCtx)
 	case config.AppIDDataPlanInfo:
-		var cd DataPlanConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildDataPlanConfig(status, provStatus, tcStatus, &cd, odsaCtx)
+		return BuildDataPlanConfig(status, provStatus, tcStatus, unmarshalConfig[DataPlanConfigData](configData, appID), odsaCtx)
 	case config.AppIDServerInitiatedODSA:
-		var cd ServerOdsaConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildServerOdsaConfig(status, provStatus, tcStatus, &cd, odsaCtx)
+		return BuildServerOdsaConfig(status, provStatus, tcStatus, unmarshalConfig[ServerOdsaConfigData](configData, appID), odsaCtx)
 	case config.AppIDDirectCarrierBilling:
-		var cd DcbConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildDcbConfig(status, provStatus, tcStatus, &cd)
+		return BuildDcbConfig(status, provStatus, tcStatus, unmarshalConfig[DcbConfigData](configData, appID))
 	case config.AppIDPrivateUserIdentity:
-		var cd PrivateIdentityConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildPrivateIdentityConfig(status, provStatus, tcStatus, &cd)
+		return BuildPrivateIdentityConfig(status, provStatus, tcStatus, unmarshalConfig[PrivateIdentityConfigData](configData, appID))
 	case config.AppIDDeviceUserInfo:
-		var cd DeviceUserInfoConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildDeviceUserInfoConfig(status, provStatus, tcStatus, &cd, odsaCtx)
+		return BuildDeviceUserInfoConfig(status, provStatus, tcStatus, unmarshalConfig[DeviceUserInfoConfigData](configData, appID), odsaCtx)
 	case config.AppIDAppAuthentication:
-		var cd AppAuthConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildAppAuthConfig(status, provStatus, tcStatus, &cd)
+		return BuildAppAuthConfig(status, provStatus, tcStatus, unmarshalConfig[AppAuthConfigData](configData, appID))
 	case config.AppIDSatelliteMode:
-		var cd SatModeConfigData
-		if err := json.Unmarshal(configData, &cd); err != nil {
-			slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
-		}
-		return BuildSatModeConfig(status, provStatus, tcStatus, &cd)
+		return BuildSatModeConfig(status, provStatus, tcStatus, unmarshalConfig[SatModeConfigData](configData, appID))
 	default:
 		return &protocol.ApplicationConfig{
 			AppID:             appID,

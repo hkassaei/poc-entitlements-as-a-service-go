@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 )
 
@@ -30,6 +31,9 @@ const (
 	r5Star = 0
 )
 
+// errInvalidKeyLen is returned when ki or op is not exactly 16 bytes.
+var errInvalidKeyLen = errors.New("milenage: ki and op must be exactly 16 bytes")
+
 // AuthVectors holds the authentication vectors produced by MILENAGE.
 type AuthVectors struct {
 	RAND []byte // 16 bytes
@@ -41,17 +45,17 @@ type AuthVectors struct {
 }
 
 // AESEncrypt performs single AES-128-ECB block encryption (16 bytes in, 16 bytes out).
-func AESEncrypt(key, input []byte) []byte {
+func AESEncrypt(key, input []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		panic("aes.NewCipher: " + err.Error())
+		return nil, fmt.Errorf("aes.NewCipher: %w", err)
 	}
 	out := make([]byte, 16)
 	block.Encrypt(out, input)
-	return out
+	return out, nil
 }
 
-// XOR two equal-length byte slices.
+// XOR returns the XOR of two equal-length byte slices.
 func XOR(a, b []byte) []byte {
 	result := make([]byte, len(a))
 	for i := range a {
@@ -79,8 +83,12 @@ func Rotate(buf []byte, bits int) []byte {
 }
 
 // ComputeOPc computes OPc = AES_K(OP) XOR OP.
-func ComputeOPc(ki, op []byte) []byte {
-	return XOR(AESEncrypt(ki, op), op)
+func ComputeOPc(ki, op []byte) ([]byte, error) {
+	enc, err := AESEncrypt(ki, op)
+	if err != nil {
+		return nil, fmt.Errorf("compute OPc: %w", err)
+	}
+	return XOR(enc, op), nil
 }
 
 // GenerateVectors generates authentication vectors with a random RAND.
@@ -89,15 +97,25 @@ func GenerateVectors(ki, op, sqn, amf []byte) (*AuthVectors, error) {
 	if _, err := rand.Read(randBytes); err != nil {
 		return nil, fmt.Errorf("crypto/rand: %w", err)
 	}
-	return GenerateVectorsWithRAND(ki, op, randBytes, sqn, amf), nil
+	return GenerateVectorsWithRAND(ki, op, randBytes, sqn, amf)
 }
 
 // GenerateVectorsWithRAND generates authentication vectors with a given RAND (deterministic, for testing).
-func GenerateVectorsWithRAND(ki, op, randVal, sqn, amf []byte) *AuthVectors {
-	opc := ComputeOPc(ki, op)
+func GenerateVectorsWithRAND(ki, op, randVal, sqn, amf []byte) (*AuthVectors, error) {
+	if len(ki) != 16 || len(op) != 16 {
+		return nil, errInvalidKeyLen
+	}
+
+	opc, err := ComputeOPc(ki, op)
+	if err != nil {
+		return nil, fmt.Errorf("generate vectors: %w", err)
+	}
 
 	// TEMP = AES_K(RAND XOR OPc)
-	temp := AESEncrypt(ki, XOR(randVal, opc))
+	temp, err := AESEncrypt(ki, XOR(randVal, opc))
+	if err != nil {
+		return nil, fmt.Errorf("generate vectors TEMP: %w", err)
+	}
 
 	// --- f1: MAC-A ---
 	// IN1 = SQN || AMF || SQN || AMF (16 bytes)
@@ -109,13 +127,21 @@ func GenerateVectorsWithRAND(ki, op, randVal, sqn, amf []byte) *AuthVectors {
 
 	// OUT1 = AES_K(rotate(IN1 XOR OPc, r1) XOR TEMP XOR c1) XOR OPc
 	f1Input := XOR(XOR(Rotate(XOR(in1, opc), r1), temp), c1[:])
-	out1 := XOR(AESEncrypt(ki, f1Input), opc)
+	out1, err := AESEncrypt(ki, f1Input)
+	if err != nil {
+		return nil, fmt.Errorf("generate vectors f1: %w", err)
+	}
+	out1 = XOR(out1, opc)
 	macA := make([]byte, 8)
 	copy(macA, out1[:8])
 
 	// --- f2 (RES) + f5 (AK) ---
 	f2Input := XOR(Rotate(XOR(temp, opc), r2), c2[:])
-	out2 := XOR(AESEncrypt(ki, f2Input), opc)
+	out2, err := AESEncrypt(ki, f2Input)
+	if err != nil {
+		return nil, fmt.Errorf("generate vectors f2: %w", err)
+	}
+	out2 = XOR(out2, opc)
 	xres := make([]byte, 8)
 	copy(xres, out2[8:16])
 	ak := make([]byte, 6)
@@ -123,13 +149,21 @@ func GenerateVectorsWithRAND(ki, op, randVal, sqn, amf []byte) *AuthVectors {
 
 	// --- f3 (CK) ---
 	f3Input := XOR(Rotate(XOR(temp, opc), r3), c3[:])
-	out3 := XOR(AESEncrypt(ki, f3Input), opc)
+	out3, err := AESEncrypt(ki, f3Input)
+	if err != nil {
+		return nil, fmt.Errorf("generate vectors f3: %w", err)
+	}
+	out3 = XOR(out3, opc)
 	ck := make([]byte, 16)
 	copy(ck, out3[:16])
 
 	// --- f4 (IK) ---
 	f4Input := XOR(Rotate(XOR(temp, opc), r4), c4[:])
-	out4 := XOR(AESEncrypt(ki, f4Input), opc)
+	out4, err := AESEncrypt(ki, f4Input)
+	if err != nil {
+		return nil, fmt.Errorf("generate vectors f4: %w", err)
+	}
+	out4 = XOR(out4, opc)
 	ik := make([]byte, 16)
 	copy(ik, out4[:16])
 
@@ -147,28 +181,54 @@ func GenerateVectorsWithRAND(ki, op, randVal, sqn, amf []byte) *AuthVectors {
 		CK:   ck,
 		IK:   ik,
 		AK:   ak,
-	}
+	}, nil
 }
 
 // F5Star computes the Anonymity Key for Resync (3GPP TS 35.206 Section 4.1).
 // Uses R5* = 0 and C5*[15] = 0x10.
-func F5Star(ki, randVal, op []byte) []byte {
-	opc := ComputeOPc(ki, op)
-	temp := AESEncrypt(ki, XOR(randVal, opc))
+func F5Star(ki, randVal, op []byte) ([]byte, error) {
+	if len(ki) != 16 || len(op) != 16 {
+		return nil, errInvalidKeyLen
+	}
+
+	opc, err := ComputeOPc(ki, op)
+	if err != nil {
+		return nil, fmt.Errorf("f5*: %w", err)
+	}
+
+	temp, err := AESEncrypt(ki, XOR(randVal, opc))
+	if err != nil {
+		return nil, fmt.Errorf("f5* TEMP: %w", err)
+	}
 
 	f5StarInput := XOR(Rotate(XOR(temp, opc), r5Star), c5Star[:])
-	out5Star := XOR(AESEncrypt(ki, f5StarInput), opc)
+	out5Star, err := AESEncrypt(ki, f5StarInput)
+	if err != nil {
+		return nil, fmt.Errorf("f5* output: %w", err)
+	}
+	out5Star = XOR(out5Star, opc)
 
 	result := make([]byte, 6)
 	copy(result, out5Star[:6])
-	return result
+	return result, nil
 }
 
 // F1Star computes MAC-S for Resync (3GPP TS 35.206 Section 4.1).
 // Uses R1* = 64 and C1*[15] = 0x80.
-func F1Star(ki, randVal, sqn, amf, op []byte) []byte {
-	opc := ComputeOPc(ki, op)
-	temp := AESEncrypt(ki, XOR(randVal, opc))
+func F1Star(ki, randVal, sqn, amf, op []byte) ([]byte, error) {
+	if len(ki) != 16 || len(op) != 16 {
+		return nil, errInvalidKeyLen
+	}
+
+	opc, err := ComputeOPc(ki, op)
+	if err != nil {
+		return nil, fmt.Errorf("f1*: %w", err)
+	}
+
+	temp, err := AESEncrypt(ki, XOR(randVal, opc))
+	if err != nil {
+		return nil, fmt.Errorf("f1* TEMP: %w", err)
+	}
 
 	in1 := make([]byte, 16)
 	copy(in1[0:], sqn[:6])
@@ -177,11 +237,15 @@ func F1Star(ki, randVal, sqn, amf, op []byte) []byte {
 	copy(in1[14:], amf[:2])
 
 	f1StarInput := XOR(XOR(Rotate(XOR(in1, opc), r1Star), temp), c1Star[:])
-	out1Star := XOR(AESEncrypt(ki, f1StarInput), opc)
+	out1Star, err := AESEncrypt(ki, f1StarInput)
+	if err != nil {
+		return nil, fmt.Errorf("f1* output: %w", err)
+	}
+	out1Star = XOR(out1Star, opc)
 
 	result := make([]byte, 8)
 	copy(result, out1Star[:8])
-	return result
+	return result, nil
 }
 
 // AuTsValidationResult is the result of AUTS validation.
@@ -191,38 +255,50 @@ type AuTsValidationResult struct {
 }
 
 // ValidateAUTS validates AUTS and extracts SQN_MS (3GPP TS 35.206 Section 6.3.3).
-func ValidateAUTS(ki, randVal, auts, op []byte) AuTsValidationResult {
+func ValidateAUTS(ki, randVal, auts, op []byte) (AuTsValidationResult, error) {
 	if len(auts) != 14 {
-		return AuTsValidationResult{Valid: false}
+		return AuTsValidationResult{Valid: false}, nil
 	}
 
 	concealedSqn := auts[:6]
 	receivedMacS := auts[6:14]
 
-	akStar := F5Star(ki, randVal, op)
+	akStar, err := F5Star(ki, randVal, op)
+	if err != nil {
+		return AuTsValidationResult{}, fmt.Errorf("validate AUTS: %w", err)
+	}
 	sqnMs := XOR(concealedSqn, akStar)
 
 	amfZero := make([]byte, 2)
-	expectedMacS := F1Star(ki, randVal, sqnMs, amfZero, op)
-
-	if subtle.ConstantTimeCompare(receivedMacS, expectedMacS) != 1 {
-		return AuTsValidationResult{Valid: false}
+	expectedMacS, err := F1Star(ki, randVal, sqnMs, amfZero, op)
+	if err != nil {
+		return AuTsValidationResult{}, fmt.Errorf("validate AUTS: %w", err)
 	}
 
-	return AuTsValidationResult{Valid: true, SqnMs: append([]byte(nil), sqnMs...)}
+	if subtle.ConstantTimeCompare(receivedMacS, expectedMacS) != 1 {
+		return AuTsValidationResult{Valid: false}, nil
+	}
+
+	return AuTsValidationResult{Valid: true, SqnMs: append([]byte(nil), sqnMs...)}, nil
 }
 
 // GenerateAUTS generates AUTS for testing — simulates a device generating AUTS
 // when its SQN is out of sync with the network.
-func GenerateAUTS(ki, randVal, sqnMs, op []byte) []byte {
-	akStar := F5Star(ki, randVal, op)
+func GenerateAUTS(ki, randVal, sqnMs, op []byte) ([]byte, error) {
+	akStar, err := F5Star(ki, randVal, op)
+	if err != nil {
+		return nil, fmt.Errorf("generate AUTS: %w", err)
+	}
 	concealedSqn := XOR(sqnMs, akStar)
 
 	amfZero := make([]byte, 2)
-	macS := F1Star(ki, randVal, sqnMs, amfZero, op)
+	macS, err := F1Star(ki, randVal, sqnMs, amfZero, op)
+	if err != nil {
+		return nil, fmt.Errorf("generate AUTS: %w", err)
+	}
 
 	auts := make([]byte, 14)
 	copy(auts[:6], concealedSqn)
 	copy(auts[6:], macS)
-	return auts
+	return auts, nil
 }
