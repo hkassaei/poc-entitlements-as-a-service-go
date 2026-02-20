@@ -635,6 +635,222 @@ The Makefile is deliberately simple. Each target is one command. No conditional 
 
 ---
 
+## The Style Guide Audit: Finding Hidden Bugs in "Working" Code
+
+After the entire codebase was functional and all tests passing, we ran a comprehensive audit against the [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md) and Google's Go best practices. This is the engineering equivalent of a home inspection after construction — the house looks fine from the outside, but the inspector finds wiring that could start a fire.
+
+The audit found issues at three priority levels, and the fixes touched 27 files. Here's what we found and why it matters.
+
+### HIGH Priority: The Bugs That Could Bite You in Production
+
+**1. A `panic` hiding in the crypto layer**
+
+The `AESEncrypt` function in `milenage.go` called `aes.NewCipher(key)` and panicked if it failed:
+
+```go
+// BEFORE: a panic bomb waiting to go off
+func AESEncrypt(key, input []byte) []byte {
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        panic(err) // This kills the entire server process
+    }
+    out := make([]byte, 16)
+    block.Encrypt(out, input)
+    return out
+}
+```
+
+In production, if a corrupted key somehow made it through (database corruption, memory error, bad migration), this would crash the entire ECS process — not just the one request, but every concurrent request being served. In Go, `panic` unwinds the entire goroutine stack, and if not recovered, takes down the process.
+
+The fix cascaded through 7 functions. `AESEncrypt` now returns `([]byte, error)`, which meant `ComputeOPc`, `GenerateVectorsWithRAND`, `F5Star`, `F1Star`, `ValidateAUTS`, and `GenerateAUTS` all needed to propagate the error. This is a textbook example of why the Uber guide says "Don't panic" — a single panic in a leaf function forces error handling redesign across the entire call chain when you eventually fix it.
+
+```go
+// AFTER: errors propagate, callers decide what to do
+func AESEncrypt(key, input []byte) ([]byte, error) {
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        return nil, fmt.Errorf("aes.NewCipher: %w", err)
+    }
+    out := make([]byte, 16)
+    block.Encrypt(out, input)
+    return out, nil
+}
+```
+
+The lesson: `panic` is for truly unrecoverable situations (programmer bugs, not runtime conditions). If there's *any* path where the input could be invalid — including paths you haven't thought of yet — return an error.
+
+**2. The audit goroutine that silently dropped every log entry**
+
+The audit logging middleware launched a goroutine to write audit logs to Postgres — a sensible fire-and-forget pattern. But it used the *request context*:
+
+```go
+// BEFORE: uses r.Context(), which is canceled when the handler returns
+go func() {
+    err := queries.InsertAuditLog(r.Context(), &db.AuditLog{...})
+    // This error was ALWAYS "context canceled" because the HTTP response
+    // was already sent, which cancels r.Context()
+}()
+```
+
+The HTTP handler returns the response, Go cancels the request context, and the goroutine's database write fails silently. Every single audit log was being dropped. The code looked correct, the server ran fine, but the audit table was empty. This is the kind of bug that passes every test (because tests don't check for audit logs) and only gets discovered during a compliance review months later.
+
+```go
+// AFTER: background context with its own timeout
+go func() {
+    bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := queries.InsertAuditLog(bgCtx, &db.AuditLog{...}); err != nil {
+        slog.Error("Failed to write audit log", "err", err)
+    }
+}()
+```
+
+The lesson: goroutines that outlive the request must use `context.Background()`, not the request context. This is a common Go mistake — the request context is designed to cancel when the response is sent, which is exactly what you *don't* want for background work.
+
+**3. Error masking in the token service**
+
+The token validation function treated every error as "token not found":
+
+```go
+// BEFORE: database failures look like invalid tokens
+tokenRow, err := s.queries.FindTokenByValue(ctx, tokenValue)
+if err != nil {
+    return nil, ErrTokenNotFound  // Redis down? "Token not found." Postgres timeout? "Token not found."
+}
+```
+
+If Redis or Postgres was having issues, every authenticated user would get "invalid token" errors instead of 500 Internal Server Error. Users would think their tokens expired when really the database was down. Debugging would be a nightmare because the error message points in the completely wrong direction.
+
+```go
+// AFTER: distinguish "not found" from "infrastructure failure"
+tokenRow, err := s.queries.FindTokenByValue(ctx, tokenValue)
+if errors.Is(err, db.ErrTokenNotFound) {
+    return nil, ErrTokenNotFound
+}
+if err != nil {
+    return nil, fmt.Errorf("query token: %w", err)
+}
+```
+
+The lesson: sentinel errors (`ErrNotFound`) exist for a reason. Always check for them specifically before falling through to a generic error handler. The Uber guide calls this the "handle errors once" rule — each error should be handled exactly once, at the right level.
+
+### MEDIUM Priority: Code Smells That Compound Over Time
+
+**18 bare `return err` statements** were wrapped with context. Before:
+
+```go
+func (s *ReauthStore) Delete(ctx context.Context, reauthID string) error {
+    return s.client.Del(ctx, reauthStoreKey(reauthID)).Err()
+}
+```
+
+After:
+
+```go
+func (s *ReauthStore) Delete(ctx context.Context, reauthID string) error {
+    if err := s.client.Del(ctx, reauthStoreKey(reauthID)).Err(); err != nil {
+        return fmt.Errorf("delete reauth state %s: %w", reauthID, err)
+    }
+    return nil
+}
+```
+
+Why does this matter? When you see `delete reauth state abc-123: connection refused` in a log, you know exactly which operation failed and which key was involved. When you see `connection refused`, you're grepping the entire codebase for every Redis call. At 3am during an outage, the difference is minutes vs. hours.
+
+**Line-of-sight refactoring** flattened deeply nested code. The principle: the happy path should be at the left margin. Error handling should be indented. This makes code scannable — you can read down the left edge and understand the success flow without mentally tracking indentation levels.
+
+```go
+// BEFORE: happy path buried inside else branches
+if status == protocol.EntitlementStatusEnabled {
+    result.AddrStatus = protocol.IntPtr(1)
+    result.Addresses = configData.Addresses
+} else {
+    result.AddrStatus = protocol.IntPtr(0)
+}
+
+// AFTER: guard clause, happy path at top level
+if status != protocol.EntitlementStatusEnabled {
+    result.AddrStatus = protocol.IntPtr(0)
+    return result
+}
+result.AddrStatus = protocol.IntPtr(1)
+result.Addresses = configData.Addresses
+```
+
+But here's a gotcha we hit: **guard clauses can break logic when there's post-branch code.** The VoWiFi handler had a T&C status check that ran *after* both branches of the if/else. Converting to a guard clause with early return skipped that check, and a test caught it. The lesson: refactor mechanically, but always verify that post-branch logic doesn't depend on both paths completing.
+
+**Signal handler lifecycle management** was tightened. The original pattern started a goroutine to listen for SIGTERM and shut down the server, but there was no way to know when shutdown completed:
+
+```go
+// BEFORE: fire-and-forget — main() might exit before shutdown finishes
+go func() {
+    <-sigCh
+    srv.Shutdown(ctx)  // Error silently discarded
+}()
+```
+
+```go
+// AFTER: channel-based lifecycle — main() waits for clean shutdown
+shutdownErr := make(chan error, 1)
+go func() {
+    <-sigCh
+    shutdownErr <- srv.Shutdown(ctx)
+}()
+
+if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) { ... }
+if err := <-shutdownErr; err != nil {
+    slog.Error("Server shutdown error", "err", err)
+}
+```
+
+The Uber guide rule: "No goroutine without an exit strategy." The channel gives the main goroutine a way to wait for shutdown and capture any error. In the old version, a shutdown error (like an in-flight request timeout) would be silently lost.
+
+**A 101-line function was split into three.** `handleEapRelayPath` was doing three different things depending on the request type. It was split into `handleEapRelayPath` (dispatcher, 30 lines), `handleReauthEapRelay` (re-auth RT2, 38 lines), and `handleFullAuthEapRelay` (full auth RT2, 36 lines). Each function now has a single responsibility and fits on one screen.
+
+**Generics eliminated copy-paste in the response builder.** The `buildAppConfig` function had 8 identical blocks:
+
+```go
+// BEFORE: same 4 lines repeated 8 times with different types
+case config.AppIDVoWiFi:
+    var cd VoWiFiConfigData
+    if err := json.Unmarshal(configData, &cd); err != nil {
+        slog.Warn("failed to unmarshal", "appId", appID, "err", err)
+    }
+    return BuildVoWiFiConfig(status, provStatus, tcStatus, &cd)
+```
+
+```go
+// AFTER: one generic helper, each case is one line
+func unmarshalConfig[T any](configData json.RawMessage, appID string) *T {
+    var cd T
+    if err := json.Unmarshal(configData, &cd); err != nil {
+        slog.Warn("failed to unmarshal config data", "appId", appID, "err", err)
+    }
+    return &cd
+}
+
+case config.AppIDVoWiFi:
+    return BuildVoWiFiConfig(status, provStatus, tcStatus, unmarshalConfig[VoWiFiConfigData](configData, appID))
+```
+
+Go 1.18 generics used surgically: one 7-line helper eliminated 32 lines of repetition without adding abstraction complexity.
+
+### LOW Priority: Polish That Separates Professional Code from "It Works" Code
+
+**Function ordering**: Go convention is exported functions first, unexported helpers after. Eight files had unexported helpers (`sessionKey`, `reauthStoreKey`, `idempotencyKey`, etc.) interleaved with exported methods. Reordering them makes the API surface immediately visible when you open a file — you see the public contract first, implementation details second.
+
+**Variable naming**: Removed redundant `*Bytes` suffixes from tightly-scoped variables. In a 20-line function where `rand` is clearly a `[]byte` from `base64.DecodeString`, calling it `randBytes` adds noise without information. Also shortened `operationTypeStr` to `opTypeRaw` and `acceptContentType` to `ct` where the scope was tight enough.
+
+**Doc comments on ~70 exported constants**: Every exported constant now has a `// SymbolName is...` comment referencing the relevant spec (RFC 4187, RFC 3748, GSMA TS.43). This isn't just style — `go doc` and IDE hover tooltips show these comments, so anyone using these constants sees the RFC section number without opening the spec.
+
+### The Meta-Lesson: Style Guides Find Real Bugs
+
+The audit started as a code style exercise and found three production-grade bugs (panic, canceled context, error masking). This isn't coincidence. Style guide rules like "don't panic," "handle errors once," and "goroutines need exit strategies" exist *because* violating them causes these exact bugs.
+
+When someone says "style is just cosmetics," remind them: the audit goroutine was dropping every log entry, and it looked perfectly fine at a glance. The style guide rule about context management would have caught it at review time. Style guides are encoded experience from engineers who already got burned.
+
+---
+
 ## Final Thoughts
 
 Re-implementing a working system in a new language is a unique engineering exercise. You already know what the system does, so you can focus entirely on *how* to express it idiomatically in the new language. The TypeScript version taught us the domain (telecom entitlements, EAP-AKA, MILENAGE, TS.43). The Go version taught us how to build the same thing with better performance characteristics and more explicit control over concurrency, memory, and deployment.
