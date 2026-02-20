@@ -1,0 +1,1 @@
+An open source implementation of entitlement server, strictly as specified in TS.43 specification and co-authored with Claude Code and Gemini Code Assist.
